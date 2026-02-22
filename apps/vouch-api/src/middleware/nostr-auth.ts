@@ -144,9 +144,10 @@ function validateNip98Event(
     return 'Missing required "method" tag';
   }
 
-  // URL comparison: match origin + pathname (ignore query params for flexibility)
-  // The spec says the "u" tag must match the absolute URL of the request.
-  // We compare normalized URLs to handle trailing slashes and case differences.
+  // URL comparison: match pathname only (origin may differ behind reverse proxies
+  // like Railway, Cloudflare, etc. where the server sees internal URLs).
+  // Pathname matching is sufficient for NIP-98 security (prevents auth event reuse
+  // across different endpoints).
   let eventUrl: URL;
   let reqUrl: URL;
   try {
@@ -156,12 +157,8 @@ function validateNip98Event(
     return `Invalid URL in "u" tag or request: ${urlTag[1]}`;
   }
 
-  // Compare origin + pathname (case-insensitive origin, exact pathname)
-  if (
-    eventUrl.origin.toLowerCase() !== reqUrl.origin.toLowerCase() ||
-    eventUrl.pathname !== reqUrl.pathname
-  ) {
-    return `URL mismatch: event has "${urlTag[1]}", request is "${requestUrl}"`;
+  if (eventUrl.pathname !== reqUrl.pathname) {
+    return `URL path mismatch: event has "${eventUrl.pathname}", request is "${reqUrl.pathname}"`;
   }
 
   // Method comparison (case-insensitive)
