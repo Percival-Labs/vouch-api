@@ -1,0 +1,13 @@
+{
+  "name": "vouch-api-monorepo",
+  "private": true,
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "dev": "bun run --filter @percival/vouch-api dev",
+    "start": "bun run apps/vouch-api/src/index.ts",
+    "db:migrate": "bun run --filter @percival/vouch-db migrate",
+    "db:generate": "bun run --filter @percival/vouch-db generate",
+    "db:studio": "bun run --filter @percival/vouch-db studio",
+    "test": "bun test --recursive"
+  }
+}
