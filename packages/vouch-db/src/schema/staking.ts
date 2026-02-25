@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, integer, bigint, pgEnum, unique, index, check } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, integer, bigint, pgEnum, unique, index, check, jsonb } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { agents } from './agents';
 import { authorTypeEnum } from './tables';
@@ -8,26 +8,31 @@ import { ulid } from 'ulid';
 // ── Enums ──
 
 export const poolStatusEnum = pgEnum('pool_status', ['active', 'frozen', 'dissolved']);
-export const stakeStatusEnum = pgEnum('stake_status', ['active', 'unstaking', 'withdrawn', 'slashed']);
+export const stakeStatusEnum = pgEnum('stake_status', ['pending', 'active', 'unstaking', 'withdrawn', 'slashed']);
 export const snapshotReasonEnum = pgEnum('snapshot_reason', ['daily', 'stake_change', 'slash', 'milestone']);
 export const treasurySourceEnum = pgEnum('treasury_source', ['slash', 'platform_fee', 'donation']);
+export const paymentPurposeEnum = pgEnum('payment_purpose', ['stake', 'withdraw', 'yield', 'treasury_fee']);
+export const paymentStatusEnum = pgEnum('payment_status', ['pending', 'paid', 'expired', 'failed']);
 
 // ── Staking Pools (one per agent) ──
 
 export const vouchPools = pgTable('vouch_pools', {
   id: text('id').primaryKey().$defaultFn(() => ulid()),
   agentId: text('agent_id').references(() => agents.id).notNull().unique(),
-  totalStakedCents: bigint('total_staked_cents', { mode: 'number' }).default(0).notNull(),
+  totalStakedSats: bigint('total_staked_sats', { mode: 'number' }).default(0).notNull(),
   totalStakers: integer('total_stakers').default(0).notNull(),
-  totalYieldPaidCents: bigint('total_yield_paid_cents', { mode: 'number' }).default(0).notNull(),
-  totalSlashedCents: bigint('total_slashed_cents', { mode: 'number' }).default(0).notNull(),
+  totalYieldPaidSats: bigint('total_yield_paid_sats', { mode: 'number' }).default(0).notNull(),
+  totalSlashedSats: bigint('total_slashed_sats', { mode: 'number' }).default(0).notNull(),
   activityFeeRateBps: integer('activity_fee_rate_bps').default(500).notNull(), // 5% default
   status: poolStatusEnum('status').default('active').notNull(),
+  lnbitsWalletId: text('lnbits_wallet_id'),
+  lnbitsAdminKey: text('lnbits_admin_key'),
+  lnbitsInvoiceKey: text('lnbits_invoice_key'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => [
-  check('check_non_negative_staked', sql`${table.totalStakedCents} >= 0`),
+  check('check_non_negative_staked', sql`${table.totalStakedSats} >= 0`),
   check('check_non_negative_stakers', sql`${table.totalStakers} >= 0`),
-  check('check_non_negative_yield', sql`${table.totalYieldPaidCents} >= 0`),
+  check('check_non_negative_yield', sql`${table.totalYieldPaidSats} >= 0`),
   check('check_fee_rate_bounds', sql`${table.activityFeeRateBps} BETWEEN 200 AND 1000`),
 ]);
 
@@ -38,14 +43,14 @@ export const stakes = pgTable('stakes', {
   poolId: text('pool_id').references(() => vouchPools.id).notNull(),
   stakerId: text('staker_id').notNull(),
   stakerType: authorTypeEnum('staker_type').notNull(), // 'user' | 'agent'
-  amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
+  amountSats: bigint('amount_sats', { mode: 'number' }).notNull(),
   stakerTrustAtStake: integer('staker_trust_at_stake').notNull(), // snapshot of staker's trust score
   status: stakeStatusEnum('status').default('active').notNull(),
   stakedAt: timestamp('staked_at').defaultNow().notNull(),
   unstakeRequestedAt: timestamp('unstake_requested_at'),
   withdrawnAt: timestamp('withdrawn_at'),
 }, (table) => [
-  check('check_positive_amount', sql`${table.amountCents} > 0`),
+  check('check_positive_amount', sql`${table.amountSats} > 0 OR ${table.status} = 'pending'`),
   // H5 fix: UNIQUE INDEX to enforce one active stake per staker per pool
   // Drizzle's unique() doesn't support partial (.where()), so we use a raw SQL unique index.
   // This must also be created via migration:
@@ -58,9 +63,9 @@ export const stakes = pgTable('stakes', {
 export const yieldDistributions = pgTable('yield_distributions', {
   id: text('id').primaryKey().$defaultFn(() => ulid()),
   poolId: text('pool_id').references(() => vouchPools.id).notNull(),
-  totalAmountCents: bigint('total_amount_cents', { mode: 'number' }).notNull(),
-  platformFeeCents: bigint('platform_fee_cents', { mode: 'number' }).notNull(),
-  distributedAmountCents: bigint('distributed_amount_cents', { mode: 'number' }).notNull(),
+  totalAmountSats: bigint('total_amount_sats', { mode: 'number' }).notNull(),
+  platformFeeSats: bigint('platform_fee_sats', { mode: 'number' }).notNull(),
+  distributedAmountSats: bigint('distributed_amount_sats', { mode: 'number' }).notNull(),
   periodStart: timestamp('period_start').notNull(),
   periodEnd: timestamp('period_end').notNull(),
   stakerCount: integer('staker_count').notNull(),
@@ -73,7 +78,7 @@ export const yieldReceipts = pgTable('yield_receipts', {
   id: text('id').primaryKey().$defaultFn(() => ulid()),
   distributionId: text('distribution_id').references(() => yieldDistributions.id).notNull(),
   stakeId: text('stake_id').references(() => stakes.id).notNull(),
-  amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
+  amountSats: bigint('amount_sats', { mode: 'number' }).notNull(),
   stakeProportionBps: integer('stake_proportion_bps').notNull(), // staker's share in basis points
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
@@ -85,13 +90,13 @@ export const activityFees = pgTable('activity_fees', {
   poolId: text('pool_id').references(() => vouchPools.id).notNull(),
   agentId: text('agent_id').references(() => agents.id).notNull(),
   actionType: text('action_type').notNull(), // 'content_creation', 'transaction', 'service', etc.
-  grossRevenueCents: bigint('gross_revenue_cents', { mode: 'number' }).notNull(),
-  feeCents: bigint('fee_cents', { mode: 'number' }).notNull(), // activity_fee_rate * gross_revenue
+  grossRevenueSats: bigint('gross_revenue_sats', { mode: 'number' }).notNull(),
+  feeSats: bigint('fee_sats', { mode: 'number' }).notNull(), // activity_fee_rate * gross_revenue
   distributionId: text('distribution_id').references(() => yieldDistributions.id), // null = undistributed (C4 fix)
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => [
-  check('check_positive_revenue', sql`${table.grossRevenueCents} > 0`),
-  check('check_positive_fee', sql`${table.feeCents} > 0`),
+  check('check_positive_revenue', sql`${table.grossRevenueSats} > 0`),
+  check('check_positive_fee', sql`${table.feeSats} > 0`),
 ]);
 
 // ── Slashing Events ──
@@ -101,9 +106,9 @@ export const slashEvents = pgTable('slash_events', {
   poolId: text('pool_id').references(() => vouchPools.id).notNull(),
   reason: text('reason').notNull(),
   evidenceHash: text('evidence_hash').notNull(), // SHA-256 of evidence
-  totalSlashedCents: bigint('total_slashed_cents', { mode: 'number' }).notNull(),
-  toAffectedCents: bigint('to_affected_cents', { mode: 'number' }).notNull(), // 50% to affected parties
-  toTreasuryCents: bigint('to_treasury_cents', { mode: 'number' }).notNull(), // 50% to community treasury
+  totalSlashedSats: bigint('total_slashed_sats', { mode: 'number' }).notNull(),
+  toAffectedSats: bigint('to_affected_sats', { mode: 'number' }).notNull(), // 50% to affected parties
+  toTreasurySats: bigint('to_treasury_sats', { mode: 'number' }).notNull(), // 50% to community treasury
   violationId: text('violation_id').references(() => chivalryViolations.id),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
@@ -128,12 +133,48 @@ export const vouchScoreHistory = pgTable('vouch_score_history', {
 
 export const treasury = pgTable('treasury', {
   id: text('id').primaryKey().$defaultFn(() => ulid()),
-  amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
+  amountSats: bigint('amount_sats', { mode: 'number' }).notNull(),
   sourceType: treasurySourceEnum('source_type').notNull(),
   sourceId: text('source_id'), // reference to slash_event or distribution
   description: text('description'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+// ── Payment Events (Lightning payment lifecycle) ──
+
+export const paymentEvents = pgTable('payment_events', {
+  id: text('id').primaryKey().$defaultFn(() => ulid()),
+  paymentHash: text('payment_hash').unique().notNull(),
+  bolt11: text('bolt11'),
+  amountSats: bigint('amount_sats', { mode: 'number' }).notNull(),
+  purpose: paymentPurposeEnum('purpose').notNull(),
+  status: paymentStatusEnum('status').default('pending').notNull(),
+  poolId: text('pool_id').references(() => vouchPools.id),
+  stakeId: text('stake_id').references(() => stakes.id),
+  stakerId: text('staker_id'),
+  lnbitsWalletId: text('lnbits_wallet_id'),
+  webhookReceivedAt: timestamp('webhook_received_at'),
+  metadata: jsonb('metadata').default({}),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => [
+  index('idx_payment_events_hash').on(table.paymentHash),
+  index('idx_payment_events_stake').on(table.stakeId),
+  index('idx_payment_events_pool').on(table.poolId),
+  index('idx_payment_events_status').on(table.status),
+]);
+
+// ── BTC Price Snapshots (display/reporting only — all accounting stays in sats) ──
+
+export const btcPriceSnapshots = pgTable('btc_price_snapshots', {
+  id: text('id').primaryKey().$defaultFn(() => ulid()),
+  priceUsd: text('price_usd').notNull(), // stored as text for decimal precision
+  source: text('source').notNull().default('coingecko'),
+  reason: text('reason').notNull().default('scheduled'), // 'scheduled' | 'yield_distribution' | 'manual'
+  capturedAt: timestamp('captured_at').defaultNow().notNull(),
+}, (table) => [
+  index('idx_btc_price_snapshots_captured').on(table.capturedAt),
+]);
 
 // ── Request Nonces (replay protection, H1) ──
 

@@ -43,6 +43,13 @@
       "when": 1771612000000,
       "tag": "0005_nostr_identity_outcomes",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1771612100000,
+      "tag": "0006_btc_price_snapshots",
+      "breakpoints": true
     }
   ]
 }

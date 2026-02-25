@@ -1,5 +1,6 @@
 // Vouch — Staking API Routes
 // All financial endpoints enforce caller identity (C2, C5 fixes).
+// Amounts are in sats (Lightning-native).
 
 import { Hono } from 'hono';
 import { success, paginated, error } from '../lib/response';
@@ -16,20 +17,25 @@ import {
 import {
   createPool,
   getPoolByAgent,
+  getPoolByAgentInternal,
   getPoolSummary,
   listPools,
   stake,
+  initiateStake,
   requestUnstake,
   withdraw,
   getStakerPositions,
+  getStakePaymentStatus,
   recordActivityFee,
   distributeYield,
   slashPool,
   computeBackingComponent,
 } from '../services/staking-service';
+import { createInvoice } from '../services/lnbits-service';
 import { getVoterWeight } from '../services/trust-service';
-import { db, stakes } from '@percival/vouch-db';
-import { eq, and } from 'drizzle-orm';
+import { getCurrentBtcPrice, satsToUsd, getPriceHistory } from '../services/price-service';
+import { db, stakes, treasury } from '@percival/vouch-db';
+import { eq, and, sql } from 'drizzle-orm';
 
 const app = new Hono<AppEnv>();
 
@@ -105,10 +111,18 @@ app.post('/pools', async (c) => {
 
 // ── Staking Routes ──
 
-/** POST /pools/:id/stake — Stake funds to back an agent */
+/** POST /pools/:id/stake — Initiate stake with Lightning invoice */
 app.post('/pools/:id/stake', async (c) => {
   try {
     const callerId = c.get('verifiedAgentId');
+    const userId = c.get('userId' as never) as string | undefined;
+
+    // S5 fix: require authenticated caller for financial operations
+    // Accept either agent Ed25519 auth or user session cookie
+    if (!callerId && !userId) {
+      return error(c, 401, 'AUTH_REQUIRED', 'Authentication required to stake');
+    }
+
     const poolId = c.req.param('id');
     const raw = await c.req.json();
     const parsed = validate(StakeSchema, raw);
@@ -117,21 +131,35 @@ app.post('/pools/:id/stake', async (c) => {
     }
     const body = parsed.data;
 
+    // S6 fix: derive staker_id from authenticated identity, not from request body
+    const stakerId = callerId || userId!;
+    const stakerType = callerId ? (body.staker_type || 'agent') : 'user';
+
     // C2 fix: agent callers can only stake as themselves
-    if (callerId && body.staker_type === 'agent' && callerId !== body.staker_id) {
+    if (callerId && stakerType === 'agent' && callerId !== stakerId) {
       return error(c, 403, 'FORBIDDEN', 'Agents can only stake as themselves');
     }
 
     // H6 fix: prevent self-staking (agent backing its own pool)
     const targetPool = await getPoolSummary(poolId);
-    if (targetPool && body.staker_id === targetPool.agentId) {
+    if (targetPool && stakerId === targetPool.agentId) {
       return error(c, 403, 'FORBIDDEN', 'Agents cannot stake in their own pool');
     }
 
     // Get staker trust score for snapshot
-    const stakerTrust = await getVoterWeight(body.staker_id, body.staker_type);
+    const stakerTrust = await getVoterWeight(stakerId, stakerType as 'user' | 'agent');
 
-    const result = await stake(poolId, body.staker_id, body.staker_type, body.amount_cents, stakerTrust);
+    // Check if pool has Lightning wallet — if so, use two-phase commit
+    const poolInternal = await getPoolByAgentInternal(targetPool?.agentId || '');
+    if (poolInternal?.lnbitsInvoiceKey) {
+      const result = await initiateStake(
+        poolId, stakerId, stakerType as 'user' | 'agent', body.amount_sats, stakerTrust, createInvoice,
+      );
+      return success(c, result, 201);
+    }
+
+    // Fallback: direct stake (no Lightning — for testing/migration)
+    const result = await stake(poolId, stakerId, stakerType as 'user' | 'agent', body.amount_sats, stakerTrust);
     return success(c, result, 201);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -143,14 +171,31 @@ app.post('/pools/:id/stake', async (c) => {
   }
 });
 
+/** GET /stakes/:id/status — Get payment status for a stake */
+app.get('/stakes/:id/status', async (c) => {
+  try {
+    const stakeId = c.req.param('id');
+    const payment = await getStakePaymentStatus(stakeId);
+    if (!payment) {
+      return error(c, 404, 'NOT_FOUND', 'No payment found for this stake');
+    }
+    return success(c, payment);
+  } catch (err) {
+    console.error('[vouch-api] GET /stakes/:id/status error:', err);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to get stake status');
+  }
+});
+
 /** POST /stakes/:id/unstake — Request unstake (begins notice period) */
 app.post('/stakes/:id/unstake', async (c) => {
   try {
     const callerId = c.get('verifiedAgentId');
+    const userId = c.get('userId' as never) as string | undefined;
+    const authenticatedId = callerId || userId;
     const stakeId = c.req.param('id');
 
     // H8 fix: require authenticated caller, use verified identity (not body)
-    if (!callerId) {
+    if (!authenticatedId) {
       return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
     }
 
@@ -159,11 +204,11 @@ app.post('/stakes/:id/unstake', async (c) => {
     if (!stakeRecord) {
       return error(c, 404, 'NOT_FOUND', 'Stake not found');
     }
-    if (stakeRecord.stakerId !== callerId) {
+    if (stakeRecord.stakerId !== authenticatedId) {
       return error(c, 403, 'FORBIDDEN', 'You can only unstake your own positions');
     }
 
-    const result = await requestUnstake(stakeId, callerId);
+    const result = await requestUnstake(stakeId, authenticatedId);
     return success(c, result);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -179,10 +224,12 @@ app.post('/stakes/:id/unstake', async (c) => {
 app.post('/stakes/:id/withdraw', async (c) => {
   try {
     const callerId = c.get('verifiedAgentId');
+    const userId = c.get('userId' as never) as string | undefined;
+    const authenticatedId = callerId || userId;
     const stakeId = c.req.param('id');
 
-    // H8 fix: require authenticated caller, use verified identity (not body)
-    if (!callerId) {
+    // S8 fix: require authenticated caller (agent or user session), use verified identity
+    if (!authenticatedId) {
       return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
     }
 
@@ -191,12 +238,25 @@ app.post('/stakes/:id/withdraw', async (c) => {
     if (!stakeRecord) {
       return error(c, 404, 'NOT_FOUND', 'Stake not found');
     }
-    if (stakeRecord.stakerId !== callerId) {
+    if (stakeRecord.stakerId !== authenticatedId) {
       return error(c, 403, 'FORBIDDEN', 'You can only withdraw your own positions');
     }
 
-    const amountCents = await withdraw(stakeId, callerId);
-    return success(c, { stakeId, withdrawn_cents: amountCents });
+    // Optional: staker can provide a BOLT11 invoice to receive sats directly
+    let bolt11: string | undefined;
+    try {
+      const body = await c.req.json();
+      bolt11 = body?.bolt11;
+    } catch {
+      // No body or invalid JSON — that's fine, bolt11 is optional
+    }
+
+    const result = await withdraw(stakeId, authenticatedId, bolt11);
+    return success(c, {
+      stakeId,
+      withdrawn_sats: result.amountSats,
+      payment_status: result.paymentStatus,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('not found') || msg.includes('Cannot withdraw')) {
@@ -238,8 +298,8 @@ app.post('/fees', async (c) => {
       return error(c, 403, 'FORBIDDEN', 'Agents can only record fees for themselves');
     }
 
-    const feeCents = await recordActivityFee(body.agent_id, body.action_type, body.gross_revenue_cents);
-    return success(c, { fee_cents: feeCents }, 201);
+    const feeSats = await recordActivityFee(body.agent_id, body.action_type, body.gross_revenue_sats);
+    return success(c, { fee_sats: feeSats }, 201);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('not allowed') || msg.includes('cannot record')) {
@@ -308,6 +368,57 @@ app.get('/vouch-score/:id', async (c) => {
   } catch (err) {
     console.error('[vouch-api] GET /vouch-score/:id error:', err);
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to compute vouch score');
+  }
+});
+
+// ── Treasury Summary ──
+
+/** GET /treasury/summary — Treasury balance in sats + USD, with price history */
+app.get('/treasury/summary', async (c) => {
+  try {
+    // Sum all treasury records
+    const [treasuryRow] = await db
+      .select({ totalSats: sql<number>`COALESCE(SUM(${treasury.amountSats}), 0)::int` })
+      .from(treasury);
+
+    const totalSats = treasuryRow?.totalSats ?? 0;
+
+    // Get current BTC price and USD equivalent
+    const btcPrice = await getCurrentBtcPrice();
+    const totalUsd = btcPrice !== null ? await satsToUsd(totalSats) : null;
+
+    // Breakdown by source type
+    const breakdown = await db
+      .select({
+        sourceType: treasury.sourceType,
+        totalSats: sql<number>`COALESCE(SUM(${treasury.amountSats}), 0)::int`,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(treasury)
+      .groupBy(treasury.sourceType);
+
+    // Recent price history for charting
+    const priceHistory = await getPriceHistory(30);
+
+    return success(c, {
+      treasury: {
+        total_sats: totalSats,
+        total_usd: totalUsd !== null ? Math.round(totalUsd * 100) / 100 : null,
+        btc_price_usd: btcPrice,
+        breakdown: breakdown.map((b) => ({
+          source_type: b.sourceType,
+          total_sats: b.totalSats,
+          count: b.count,
+        })),
+      },
+      price_history: priceHistory.map((p) => ({
+        price_usd: p.priceUsd,
+        captured_at: p.capturedAt.toISOString(),
+      })),
+    });
+  } catch (err) {
+    console.error('[vouch-api] GET /treasury/summary error:', err);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to get treasury summary');
   }
 });
 
