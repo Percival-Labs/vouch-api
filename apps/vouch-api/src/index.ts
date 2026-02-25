@@ -43,7 +43,10 @@ app.onError((err, c) => {
 });
 
 // ── Security middleware ──
-app.use('*', secureHeaders()); // X-Content-Type-Options, X-Frame-Options, etc. (H4)
+app.use('*', secureHeaders({
+  contentSecurityPolicy: { defaultSrc: ["'none'"] },
+  strictTransportSecurity: 'max-age=31536000; includeSubDomains',
+})); // X-Content-Type-Options, X-Frame-Options, CSP, HSTS (H4)
 app.use('*', cors({
   origin: process.env.VOUCH_CORS_ORIGIN || 'http://localhost:3600', // Vouch frontend (H5)
   allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -63,19 +66,14 @@ app.use('/v1/*', rateLimiter('global'));
 // ── Health check (no auth) ──
 app.get('/', (c) => {
   return c.json({
-    service: '@percival/vouch-api',
-    version: '0.4.0',
+    service: 'vouch-api',
     status: 'running',
     timestamp: new Date().toISOString(),
   });
 });
 
 app.get('/health', (c) => {
-  return c.json({
-    status: 'ok',
-    service: '@percival/vouch-api',
-    version: '0.4.0',
-  });
+  return c.json({ status: 'ok' });
 });
 
 // ── OpenAPI spec ──
