@@ -11,8 +11,9 @@ export const poolStatusEnum = pgEnum('pool_status', ['active', 'frozen', 'dissol
 export const stakeStatusEnum = pgEnum('stake_status', ['pending', 'active', 'unstaking', 'withdrawn', 'slashed']);
 export const snapshotReasonEnum = pgEnum('snapshot_reason', ['daily', 'stake_change', 'slash', 'milestone']);
 export const treasurySourceEnum = pgEnum('treasury_source', ['slash', 'platform_fee', 'donation']);
-export const paymentPurposeEnum = pgEnum('payment_purpose', ['stake', 'withdraw', 'yield', 'treasury_fee']);
+export const paymentPurposeEnum = pgEnum('payment_purpose', ['stake', 'withdraw', 'yield', 'treasury_fee', 'contract_milestone', 'contract_retention', 'contract_refund']);
 export const paymentStatusEnum = pgEnum('payment_status', ['pending', 'paid', 'expired', 'failed']);
+export const nwcConnectionStatusEnum = pgEnum('nwc_connection_status', ['active', 'revoked', 'expired']);
 
 // ── Staking Pools (one per agent) ──
 
@@ -25,15 +26,33 @@ export const vouchPools = pgTable('vouch_pools', {
   totalSlashedSats: bigint('total_slashed_sats', { mode: 'number' }).default(0).notNull(),
   activityFeeRateBps: integer('activity_fee_rate_bps').default(500).notNull(), // 5% default
   status: poolStatusEnum('status').default('active').notNull(),
-  lnbitsWalletId: text('lnbits_wallet_id'),
-  lnbitsAdminKey: text('lnbits_admin_key'),
-  lnbitsInvoiceKey: text('lnbits_invoice_key'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => [
   check('check_non_negative_staked', sql`${table.totalStakedSats} >= 0`),
   check('check_non_negative_stakers', sql`${table.totalStakers} >= 0`),
   check('check_non_negative_yield', sql`${table.totalYieldPaidSats} >= 0`),
   check('check_fee_rate_bounds', sql`${table.activityFeeRateBps} BETWEEN 200 AND 1000`),
+]);
+
+// ── NWC Connections (non-custodial wallet links) ──
+
+export const nwcConnections = pgTable('nwc_connections', {
+  id: text('id').primaryKey().$defaultFn(() => ulid()),
+  userNpub: text('user_npub').notNull(),
+  connectionString: text('connection_string').notNull(), // AES-256-GCM encrypted
+  walletPubkey: text('wallet_pubkey'),
+  budgetSats: bigint('budget_sats', { mode: 'number' }).notNull(),
+  spentSats: bigint('spent_sats', { mode: 'number' }).default(0).notNull(),
+  methodsAuthorized: jsonb('methods_authorized').default([]).notNull(), // ['pay_invoice', 'make_invoice', ...]
+  status: nwcConnectionStatusEnum('status').default('active').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  expiresAt: timestamp('expires_at'),
+}, (table) => [
+  check('check_non_negative_budget', sql`${table.budgetSats} >= 0`),
+  check('check_non_negative_spent', sql`${table.spentSats} >= 0`),
+  check('check_spent_within_budget', sql`${table.spentSats} <= ${table.budgetSats}`),
+  index('idx_nwc_user_npub').on(table.userNpub),
+  index('idx_nwc_status').on(table.status),
 ]);
 
 // ── Individual Stakes ──
@@ -46,6 +65,7 @@ export const stakes = pgTable('stakes', {
   amountSats: bigint('amount_sats', { mode: 'number' }).notNull(),
   stakerTrustAtStake: integer('staker_trust_at_stake').notNull(), // snapshot of staker's trust score
   status: stakeStatusEnum('status').default('active').notNull(),
+  nwcConnectionId: text('nwc_connection_id').references(() => nwcConnections.id),
   stakedAt: timestamp('staked_at').defaultNow().notNull(),
   unstakeRequestedAt: timestamp('unstake_requested_at'),
   withdrawnAt: timestamp('withdrawn_at'),
@@ -152,7 +172,9 @@ export const paymentEvents = pgTable('payment_events', {
   poolId: text('pool_id').references(() => vouchPools.id),
   stakeId: text('stake_id').references(() => stakes.id),
   stakerId: text('staker_id'),
-  lnbitsWalletId: text('lnbits_wallet_id'),
+  nwcConnectionId: text('nwc_connection_id').references(() => nwcConnections.id),
+  contractId: text('contract_id'), // FK enforced at DB level (references contracts.id)
+  milestoneId: text('milestone_id'), // FK enforced at DB level (references contract_milestones.id)
   webhookReceivedAt: timestamp('webhook_received_at'),
   metadata: jsonb('metadata').default({}),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -162,6 +184,7 @@ export const paymentEvents = pgTable('payment_events', {
   index('idx_payment_events_stake').on(table.stakeId),
   index('idx_payment_events_pool').on(table.poolId),
   index('idx_payment_events_status').on(table.status),
+  index('idx_payment_events_contract').on(table.contractId),
 ]);
 
 // ── BTC Price Snapshots (display/reporting only — all accounting stays in sats) ──

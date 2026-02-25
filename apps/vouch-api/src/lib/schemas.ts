@@ -81,14 +81,15 @@ export const CreatePoolSchema = z.object({
 });
 
 export const StakeSchema = z.object({
-  staker_id: nonEmptyId,
+  // S6 fix: staker_id is optional — server derives from auth context when not provided
+  staker_id: nonEmptyId.optional(),
   staker_type: stakerType,
-  amount_cents: z
+  amount_sats: z
     .number()
     .int("Amount must be an integer")
     .positive("Amount must be positive")
-    .min(1000, "Minimum stake is $10.00 (1000 cents)")
-    .max(10_000_000, "Maximum stake is $100,000 (10,000,000 cents)"),
+    .min(10_000, "Minimum stake is 10,000 sats")
+    .max(100_000_000, "Maximum stake is 100,000,000 sats (1 BTC)"),
 });
 
 export const UnstakeSchema = z.object({
@@ -109,12 +110,12 @@ export const FeeRecordSchema = z.object({
     .string()
     .min(1, "Action type is required")
     .max(100, "Action type must be at most 100 characters"),
-  gross_revenue_cents: z
+  gross_revenue_sats: z
     .number()
     .int("Revenue must be an integer")
     .positive("Revenue must be positive")
-    .min(1, "Revenue must be at least 1 cent")
-    .max(10_000_000, "Revenue must be at most $100,000 (10,000,000 cents)"),
+    .min(1, "Revenue must be at least 1 sat")
+    .max(100_000_000, "Revenue must be at most 100,000,000 sats (1 BTC)"),
 });
 
 export const DistributeSchema = z.object({
@@ -198,6 +199,124 @@ export const PaginationSchema = z.object({
     .max(100, "Limit must be at most 100")
     .default(25)
     .optional(),
+});
+
+// ---------------------------------------------------------------------------
+// Contract schemas
+// ---------------------------------------------------------------------------
+
+export const SowSchema = z.object({
+  deliverables: z.array(z.string().min(1)).min(1, "At least one deliverable required").max(20),
+  acceptance_criteria: z.array(z.string().min(1)).min(1, "At least one acceptance criterion required").max(20),
+  exclusions: z.array(z.string()).max(20).default([]),
+  tools_required: z.array(z.string()).max(10).optional(),
+  timeline_description: z.string().max(1000).optional(),
+});
+
+const MilestoneInputSchema = z.object({
+  title: z.string().min(1, "Title is required").max(200),
+  description: z.string().max(2000).optional(),
+  acceptance_criteria: z.string().max(2000).optional(),
+  percentage_bps: z
+    .number()
+    .int("Percentage must be an integer")
+    .min(1, "Must be at least 1 bps")
+    .max(10000, "Must be at most 10000 bps"),
+});
+
+export const CreateContractSchema = z.object({
+  agent_pubkey: z.string().min(1, "Agent pubkey is required"),
+  title: z
+    .string()
+    .min(1, "Title is required")
+    .max(200, "Title must be at most 200 characters")
+    .transform((s) => s.trim()),
+  description: z.string().max(5000, "Description must be at most 5000 characters").optional(),
+  sow: SowSchema,
+  total_sats: z
+    .number()
+    .int("Amount must be an integer")
+    .positive("Amount must be positive")
+    .min(1000, "Minimum contract is 1,000 sats")
+    .max(1_000_000_000, "Maximum contract is 1,000,000,000 sats (10 BTC)"),
+  retention_bps: z
+    .number()
+    .int("Retention must be an integer")
+    .min(0, "Retention must be at least 0 bps")
+    .max(5000, "Retention must be at most 5000 bps (50%)")
+    .default(1000),
+  retention_release_after_days: z
+    .number()
+    .int("Days must be an integer")
+    .min(0, "Must be at least 0 days")
+    .max(365, "Must be at most 365 days")
+    .default(30),
+  milestones: z.array(MilestoneInputSchema).min(1, "At least one milestone required").max(20),
+});
+
+export const UpdateContractSchema = z.object({
+  title: z.string().min(1).max(200).transform((s) => s.trim()).optional(),
+  description: z.string().max(5000).optional(),
+  sow: SowSchema.optional(),
+  total_sats: z.number().int().positive().min(1000).max(1_000_000_000).optional(),
+  retention_bps: z.number().int().min(0).max(5000).optional(),
+  retention_release_after_days: z.number().int().min(0).max(365).optional(),
+});
+
+export const SubmitMilestoneSchema = z.object({
+  deliverable_url: z.string().max(2000).optional(),
+  deliverable_notes: z.string().max(5000).optional(),
+});
+
+export const RejectMilestoneSchema = z.object({
+  reason: z
+    .string()
+    .min(1, "Reason is required")
+    .max(2000, "Reason must be at most 2000 characters"),
+});
+
+export const ProposeChangeOrderSchema = z.object({
+  title: z
+    .string()
+    .min(1, "Title is required")
+    .max(200, "Title must be at most 200 characters")
+    .transform((s) => s.trim()),
+  description: z
+    .string()
+    .min(1, "Description is required")
+    .max(5000, "Description must be at most 5000 characters"),
+  cost_delta_sats: z
+    .number()
+    .int("Cost delta must be an integer")
+    .min(-1_000_000_000, "Cost delta too negative")
+    .max(1_000_000_000, "Cost delta too large")
+    .default(0),
+  timeline_delta_days: z
+    .number()
+    .int("Timeline delta must be an integer")
+    .min(-365, "Timeline delta too negative")
+    .max(365, "Timeline delta too large")
+    .default(0),
+});
+
+export const RejectChangeOrderSchema = z.object({
+  reason: z.string().max(2000).optional(),
+});
+
+export const RateContractSchema = z.object({
+  rating: z
+    .number()
+    .int("Rating must be an integer")
+    .min(1, "Rating must be at least 1")
+    .max(5, "Rating must be at most 5"),
+  review: z.string().max(2000, "Review must be at most 2000 characters").optional(),
+});
+
+export const CancelContractSchema = z.object({
+  reason: z
+    .string()
+    .min(1, "Reason is required")
+    .max(2000, "Reason must be at most 2000 characters"),
 });
 
 // ---------------------------------------------------------------------------

@@ -22,7 +22,9 @@ import postRoutes from './routes/posts';
 import trustRoutes from './routes/trust';
 import stakingRoutes from './routes/staking';
 import publicRoutes from './routes/public';
+import contractRoutes from './routes/contracts';
 import { spec as openapiSpec } from './openapi-spec';
+import { processRetentionReleases } from './services/contract-service';
 
 // Combined env supports both Ed25519 (AppEnv) and Nostr (NostrAuthEnv) auth flows
 type CombinedEnv = {
@@ -93,11 +95,12 @@ app.use('/v1/auth/login', rateLimiter('auth_login'));
 // ── H10 fix: SDK registration rate limit (5/hour, must be before auth middleware) ──
 app.use('/v1/sdk/agents/register', rateLimiter('registration'));
 
-// ── Nostr NIP-98 auth for SDK routes ──
+// ── Nostr NIP-98 auth for SDK routes + contract routes ──
 // Applied before Ed25519 middleware. SDK routes use Authorization: Nostr header.
 // The middleware skips /v1/public/* and /v1/auth/* internally.
 app.use('/v1/sdk/*', verifyNostrAuth);
 app.use('/v1/outcomes/*', verifyNostrAuth);
+app.use('/v1/contracts/*', verifyNostrAuth);
 
 // ── Ed25519 signature verification middleware ──
 // Applied to all /v1/* routes. Auth paths, /v1/public/*, and /v1/sdk/* are exempted inside the middleware.
@@ -115,6 +118,8 @@ app.use('/v1/staking/stakes/*/withdraw', agentRateLimiter('financial'));
 app.use('/v1/staking/fees', agentRateLimiter('financial'));
 app.use('/v1/staking/pools/*/distribute', agentRateLimiter('financial'));
 app.use('/v1/trust/refresh/*', agentRateLimiter('trust_refresh'));
+app.use('/v1/contracts/*/fund', agentRateLimiter('financial'));
+app.use('/v1/contracts/*/milestones/*/accept', agentRateLimiter('financial'));
 
 // ── Mount route groups ──
 app.route('/v1/auth', authRoutes);      // user cookie-based sessions (no Ed25519 required)
@@ -125,6 +130,7 @@ app.route('/v1/agents', agentRoutes);
 app.route('/v1/tables', tableRoutes);
 app.route('/v1/trust', trustRoutes);
 app.route('/v1/staking', stakingRoutes);
+app.route('/v1/contracts', contractRoutes); // Contract system (NIP-98 auth)
 app.route('/v1', postRoutes); // posts handles /tables/:slug/posts, /posts/:id, /comments/:id/vote
 
 // ── Nonce cleanup cron (every 5 minutes) ──
@@ -137,6 +143,18 @@ const nonceCleanupInterval = setInterval(async () => {
 }, 5 * 60 * 1000);
 if (nonceCleanupInterval && typeof nonceCleanupInterval === 'object' && 'unref' in nonceCleanupInterval) {
   nonceCleanupInterval.unref();
+}
+
+// ── Retention release cron (daily — checks for contracts past retention period) ──
+const retentionInterval = setInterval(async () => {
+  try {
+    await processRetentionReleases();
+  } catch (e) {
+    console.error('[vouch-api] Retention release error:', e);
+  }
+}, 24 * 60 * 60 * 1000);
+if (retentionInterval && typeof retentionInterval === 'object' && 'unref' in retentionInterval) {
+  retentionInterval.unref();
 }
 
 // ── Start server ──
