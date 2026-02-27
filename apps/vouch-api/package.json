@@ -9,7 +9,7 @@
     "start": "bun run src/index.ts"
   },
   "dependencies": {
-    "@getalby/sdk": "^3.0.0",
+    "@getalby/sdk": "^7.0.0",
     "@noble/curves": "^1.8.2",
     "@percival/vouch-db": "workspace:*",
     "@scure/base": "^1.2.4",
