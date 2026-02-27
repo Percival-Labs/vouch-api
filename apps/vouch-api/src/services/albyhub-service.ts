@@ -1,12 +1,9 @@
-// Alby Hub Service — wraps Alby Hub REST API for platform treasury operations.
-// Replaces LNbits for all platform-side Lightning wallet management.
-// All calls go through albyhubRequest() with retry logic.
+// Alby Hub Service — wraps NWC (Nostr Wallet Connect) for platform treasury operations.
+// Uses the stable NWC protocol (NIP-47) per Alby's recommendation.
+// Single env var: NWC_URL (the nostr+walletconnect://... connection string).
+// All calls go through getNwcClient() with per-request client lifecycle.
 
-const ALBY_HUB_URL = process.env.ALBY_HUB_URL || 'http://localhost:8080';
-const ALBY_HUB_JWT = process.env.ALBY_HUB_JWT || '';
-
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 500;
+const NWC_URL = process.env.NWC_URL || '';
 
 // ── Types ──
 
@@ -31,63 +28,42 @@ export interface AlbyBalance {
   balanceSats: number;
 }
 
-// ── HTTP Helper with Retry ──
+// ── NWC Client Helper ──
 
-async function albyhubRequest<T>(
-  path: string,
-  options: {
-    method?: string;
-    body?: Record<string, unknown>;
-  } = {},
-): Promise<T> {
-  const { method = 'GET', body } = options;
+type NWCClient = {
+  getInfo(): Promise<Record<string, unknown>>;
+  getBalance(): Promise<{ balance: number }>;
+  makeInvoice(params: { amount: number; description?: string }): Promise<Record<string, unknown>>;
+  payInvoice(params: { invoice: string }): Promise<{ preimage: string }>;
+  close(): void;
+};
 
-  let lastError: Error | null = null;
-
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    try {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
-      if (ALBY_HUB_JWT) {
-        headers['Authorization'] = `Bearer ${ALBY_HUB_JWT}`;
-      }
-
-      const res = await fetch(`${ALBY_HUB_URL}${path}`, {
-        method,
-        headers,
-        body: body ? JSON.stringify(body) : undefined,
-      });
-
-      if (res.status === 429) {
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
-        console.warn(`[albyhub] Rate limited (429), retrying in ${delay}ms...`);
-        await sleep(delay);
-        continue;
-      }
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => 'unknown error');
-        throw new Error(`Alby Hub API error ${res.status}: ${text}`);
-      }
-
-      return (await res.json()) as T;
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-
-      if (attempt < MAX_RETRIES - 1) {
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
-        console.warn(`[albyhub] Request failed (attempt ${attempt + 1}/${MAX_RETRIES}), retrying in ${delay}ms:`, lastError.message);
-        await sleep(delay);
-      }
-    }
+/**
+ * Create a fresh NWC client for the platform treasury.
+ * Caller must call client.close() when done.
+ */
+async function createNwcClient(): Promise<NWCClient> {
+  if (!NWC_URL) {
+    throw new Error('NWC_URL not configured — set the Nostr Wallet Connect URL for the platform treasury');
   }
 
-  throw lastError ?? new Error('Alby Hub request failed after retries');
+  const { nwc } = await import('@getalby/sdk');
+  return new nwc.NWCClient({
+    nostrWalletConnectUrl: NWC_URL,
+  });
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Execute an NWC operation with automatic client lifecycle management.
+ * Creates a client, runs the operation, and closes the client.
+ */
+async function withNwcClient<T>(operation: (client: NWCClient) => Promise<T>): Promise<T> {
+  const client = await createNwcClient();
+  try {
+    return await operation(client);
+  } finally {
+    client.close();
+  }
 }
 
 // ── Invoice Management ──
@@ -97,21 +73,17 @@ function sleep(ms: number): Promise<void> {
  * Used when the platform needs to receive payment (e.g., slash charges via NWC).
  */
 export async function createInvoice(amountSats: number, memo: string): Promise<AlbyInvoice> {
-  const result = await albyhubRequest<{
-    payment_hash: string;
-    payment_request: string;
-  }>('/api/invoices', {
-    method: 'POST',
-    body: {
-      amount: amountSats * 1000, // Alby Hub uses millisats
+  return withNwcClient(async (client) => {
+    const result = await client.makeInvoice({
+      amount: amountSats * 1000, // NWC uses millisats
       description: memo,
-    },
-  });
+    });
 
-  return {
-    paymentHash: result.payment_hash,
-    paymentRequest: result.payment_request,
-  };
+    return {
+      paymentHash: (result as Record<string, unknown>).payment_hash as string,
+      paymentRequest: (result as Record<string, unknown>).invoice as string,
+    };
+  });
 }
 
 /**
@@ -119,18 +91,14 @@ export async function createInvoice(amountSats: number, memo: string): Promise<A
  * Used for yield payouts sent to user wallets via NWC make_invoice.
  */
 export async function payInvoice(bolt11: string): Promise<AlbyPayment> {
-  const result = await albyhubRequest<{
-    payment_hash: string;
-    preimage: string;
-  }>('/api/payments/bolt11', {
-    method: 'POST',
-    body: { invoice: bolt11 },
-  });
+  return withNwcClient(async (client) => {
+    const result = await client.payInvoice({ invoice: bolt11 });
 
-  return {
-    paymentHash: result.payment_hash,
-    preimage: result.preimage,
-  };
+    return {
+      paymentHash: '', // NWC pay_invoice response only includes preimage
+      preimage: result.preimage,
+    };
+  });
 }
 
 // ── Balance ──
@@ -139,11 +107,10 @@ export async function payInvoice(bolt11: string): Promise<AlbyPayment> {
  * Get the platform treasury balance in sats.
  */
 export async function getBalance(): Promise<number> {
-  const result = await albyhubRequest<{
-    balance: number; // millisats
-  }>('/api/balance');
-
-  return Math.floor(result.balance / 1000);
+  return withNwcClient(async (client) => {
+    const result = await client.getBalance();
+    return Math.floor(result.balance / 1000); // NWC returns millisats
+  });
 }
 
 // ── Node Info ──
@@ -152,33 +119,31 @@ export async function getBalance(): Promise<number> {
  * Get info about the platform's Lightning node.
  */
 export async function getNodeInfo(): Promise<AlbyNodeInfo> {
-  const result = await albyhubRequest<{
-    alias: string;
-    identity_pubkey: string;
-    network: string;
-    block_height: number;
-  }>('/api/node/info');
+  return withNwcClient(async (client) => {
+    const result = await client.getInfo();
 
-  return {
-    alias: result.alias,
-    pubkey: result.identity_pubkey,
-    network: result.network,
-    blockHeight: result.block_height,
-  };
+    return {
+      alias: (result.alias as string) || '',
+      pubkey: (result.pubkey as string) || '',
+      network: (result.network as string) || '',
+      blockHeight: (result.block_height as number) || 0,
+    };
+  });
 }
 
 // ── Health Check ──
 
 /**
- * Check if Alby Hub is reachable and healthy.
+ * Check if the platform treasury is reachable via NWC.
  */
 export async function healthCheck(): Promise<boolean> {
+  if (!NWC_URL) return false;
+
   try {
-    const res = await fetch(`${ALBY_HUB_URL}/api/health`, {
-      signal: AbortSignal.timeout(5000),
-      headers: ALBY_HUB_JWT ? { 'Authorization': `Bearer ${ALBY_HUB_JWT}` } : {},
+    await withNwcClient(async (client) => {
+      await client.getInfo();
     });
-    return res.ok;
+    return true;
   } catch {
     return false;
   }

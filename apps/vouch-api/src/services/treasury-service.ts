@@ -1,81 +1,38 @@
-// Treasury Service — manages the platform treasury Lightning wallet.
-// Treasury wallet receives yield distribution platform fees (1%). No staking deposit fee.
-// Singleton wallet, created once at startup, cached for the process lifetime.
+// Treasury Service — manages the platform treasury via Alby Hub.
+// Treasury = the platform's Alby Hub Lightning node balance.
+// Income: yield distribution platform fees (1%), slash proceeds (charged via NWC).
+// Outgoing: yield payments to stakers (via NWC).
 
-import {
-  createUserWithWallet,
-  getWalletBalance,
-  internalTransfer,
-  type LnbitsWallet,
-} from './lnbits-service';
-import { db, treasury, vouchPools, stakes, agents, vouchScoreHistory } from '@percival/vouch-db';
+import { getBalance, healthCheck, getNodeInfo } from './albyhub-service';
+import { db, treasury, vouchPools, stakes, agents } from '@percival/vouch-db';
 import { eq, and, sql } from 'drizzle-orm';
 import { stake as stakeInPool } from './staking-service';
 
-// ── Cached Treasury Keys ──
-
-let cachedTreasuryWallet: {
-  walletId: string;
-  adminKey: string;
-  invoiceKey: string;
-} | null = null;
+// ── Treasury Initialization ──
 
 /**
- * Get the treasury wallet's invoice key (for receiving payments).
- */
-export function getTreasuryInvoiceKey(): string {
-  if (!cachedTreasuryWallet) {
-    throw new Error('Treasury not initialized — call initTreasury() at startup');
-  }
-  return cachedTreasuryWallet.invoiceKey;
-}
-
-/**
- * Get the treasury wallet's admin key (for sending payments).
- */
-export function getTreasuryAdminKey(): string {
-  if (!cachedTreasuryWallet) {
-    throw new Error('Treasury not initialized — call initTreasury() at startup');
-  }
-  return cachedTreasuryWallet.adminKey;
-}
-
-/**
- * Initialize the treasury wallet.
- * Uses env vars if they exist (pre-created wallet), otherwise creates a new one.
+ * Initialize the treasury — verify Alby Hub is reachable.
  * Call once at API startup.
  */
 export async function initTreasury(): Promise<void> {
-  const walletId = process.env.TREASURY_LNBITS_WALLET_ID;
-  const adminKey = process.env.TREASURY_LNBITS_ADMIN_KEY;
-  const invoiceKey = process.env.TREASURY_LNBITS_INVOICE_KEY;
-
-  if (walletId && adminKey && invoiceKey) {
-    cachedTreasuryWallet = { walletId, adminKey, invoiceKey };
-    console.log('[treasury] Loaded from env vars, wallet:', walletId);
-    return;
-  }
-
-  // No env vars — create treasury wallet in LNbits
-  console.log('[treasury] No env vars found, creating treasury wallet in LNbits...');
-  try {
-    const wallet = await createUserWithWallet('vouch-treasury', 'vouch-treasury');
-    cachedTreasuryWallet = {
-      walletId: wallet.id,
-      adminKey: wallet.adminKey,
-      invoiceKey: wallet.invoiceKey,
-    };
-    console.log('[treasury] Created new treasury wallet:', wallet.id);
-    console.warn('[treasury] IMPORTANT: Set TREASURY_LNBITS_WALLET_ID, TREASURY_LNBITS_ADMIN_KEY, and TREASURY_LNBITS_INVOICE_KEY env vars for persistence.');
-    console.warn('[treasury] Wallet keys have been generated — retrieve them from the LNbits admin UI.');
-  } catch (err) {
-    console.warn('[treasury] Failed to create wallet (LNbits may not be running):', err instanceof Error ? err.message : err);
-    console.warn('[treasury] Treasury features will be unavailable until LNbits is configured');
+  const healthy = await healthCheck();
+  if (healthy) {
+    try {
+      const info = await getNodeInfo();
+      console.log(`[treasury] Alby Hub connected: ${info.alias} (${info.pubkey.slice(0, 16)}...) on ${info.network}`);
+      const balance = await getBalance();
+      console.log(`[treasury] Treasury balance: ${balance} sats`);
+    } catch (err) {
+      console.warn('[treasury] Alby Hub reachable but info unavailable:', err instanceof Error ? err.message : err);
+    }
+  } else {
+    console.warn('[treasury] Alby Hub not reachable — treasury features will be limited');
+    console.warn('[treasury] Set NWC_URL to connect (Nostr Wallet Connect string from Alby Hub)');
   }
 }
 
 /**
- * Reconcile treasury: compare DB-recorded total vs actual LNbits wallet balance.
+ * Reconcile treasury: compare DB-recorded total vs actual Alby Hub wallet balance.
  * Logs discrepancies but doesn't auto-correct (needs human review).
  */
 export async function reconcileTreasury(): Promise<{
@@ -83,10 +40,6 @@ export async function reconcileTreasury(): Promise<{
   walletBalance: number;
   discrepancy: number;
 } | null> {
-  if (!cachedTreasuryWallet) {
-    return null;
-  }
-
   try {
     // Sum all treasury records in DB
     const [row] = await db
@@ -95,8 +48,8 @@ export async function reconcileTreasury(): Promise<{
 
     const dbTotal = row?.total ?? 0;
 
-    // Get actual LNbits wallet balance
-    const walletBalance = await getWalletBalance(cachedTreasuryWallet.adminKey);
+    // Get actual Alby Hub node balance
+    const walletBalance = await getBalance();
 
     const discrepancy = walletBalance - dbTotal;
 
@@ -115,12 +68,11 @@ export async function reconcileTreasury(): Promise<{
 
 // ── PL Treasury Auto-Staking (Sovereign Wealth Fund Model) ──
 
-// Configuration from env vars (with sensible defaults)
 const PL_STAKER_ID = process.env.PL_STAKER_ID || 'pl-treasury';
-const PL_OPERATING_RESERVE_SATS = parseInt(process.env.PL_OPERATING_RESERVE_SATS || '50000', 10); // ~$50
-const PL_MAX_POOL_CONCENTRATION_BPS = parseInt(process.env.PL_MAX_POOL_CONCENTRATION_BPS || '2000', 10); // 20%
-const PL_EXTRACTION_THRESHOLD_SATS = parseInt(process.env.PL_EXTRACTION_THRESHOLD_SATS || '10000000', 10); // 0.1 BTC
-const PL_MIN_STAKE_SATS = 10_000; // Same as MIN_STAKE_SATS in staking service
+const PL_OPERATING_RESERVE_SATS = parseInt(process.env.PL_OPERATING_RESERVE_SATS || '50000', 10);
+const PL_MAX_POOL_CONCENTRATION_BPS = parseInt(process.env.PL_MAX_POOL_CONCENTRATION_BPS || '2000', 10);
+const PL_EXTRACTION_THRESHOLD_SATS = parseInt(process.env.PL_EXTRACTION_THRESHOLD_SATS || '10000000', 10);
+const PL_MIN_STAKE_SATS = 10_000;
 
 export interface RebalanceResult {
   walletBalance: number;
@@ -132,24 +84,12 @@ export interface RebalanceResult {
 
 /**
  * PL Treasury Rebalance — the core of the Sovereign Wealth Fund model.
- *
- * 1. Check treasury wallet balance
- * 2. Deduct operating reserve
- * 3. Select top-performing agent pools (by Vouch Score + total staked)
- * 4. Stake available balance across pools (max 20% per pool for diversification)
- * 5. Record as PL stakes in the normal staking tables
- *
  * Call daily or on each yield cycle.
  */
 export async function runTreasuryRebalance(): Promise<RebalanceResult | null> {
-  if (!cachedTreasuryWallet) {
-    console.warn('[treasury] Cannot rebalance — treasury not initialized');
-    return null;
-  }
-
   try {
-    // 1. Get available balance
-    const walletBalance = await getWalletBalance(cachedTreasuryWallet.adminKey);
+    // 1. Get available balance from Alby Hub
+    const walletBalance = await getBalance();
     const availableForStaking = Math.max(0, walletBalance - PL_OPERATING_RESERVE_SATS);
 
     if (availableForStaking < PL_MIN_STAKE_SATS) {
@@ -163,7 +103,7 @@ export async function runTreasuryRebalance(): Promise<RebalanceResult | null> {
       };
     }
 
-    // 2. Get top agent pools (active, not PL's own, sorted by total staked + yield)
+    // 2. Get top agent pools (active, sorted by total staked + yield)
     const eligiblePools = await db
       .select({
         id: vouchPools.id,
@@ -172,7 +112,6 @@ export async function runTreasuryRebalance(): Promise<RebalanceResult | null> {
         totalStakedSats: vouchPools.totalStakedSats,
         totalYieldPaidSats: vouchPools.totalYieldPaidSats,
         totalStakers: vouchPools.totalStakers,
-        lnbitsInvoiceKey: vouchPools.lnbitsInvoiceKey,
       })
       .from(vouchPools)
       .innerJoin(agents, eq(agents.id, vouchPools.agentId))
@@ -220,13 +159,8 @@ export async function runTreasuryRebalance(): Promise<RebalanceResult | null> {
       const roomInPool = Math.max(0, maxPerPool - existingInPool);
       if (roomInPool < PL_MIN_STAKE_SATS) continue;
 
-      // Equal-weight allocation across eligible pools, capped by concentration limit
       const targetPerPool = Math.round(availableForStaking / eligiblePools.length);
-      const allocationAmount = Math.min(
-        targetPerPool,
-        roomInPool,
-        remaining,
-      );
+      const allocationAmount = Math.min(targetPerPool, roomInPool, remaining);
 
       if (allocationAmount >= PL_MIN_STAKE_SATS) {
         allocations.push({
@@ -247,9 +181,9 @@ export async function runTreasuryRebalance(): Promise<RebalanceResult | null> {
         await stakeInPool(
           alloc.poolId,
           PL_STAKER_ID,
-          'agent', // PL stakes as an agent-type participant
+          'agent',
           alloc.amountSats,
-          1000, // PL has max trust score as platform operator
+          1000, // PL has max trust score
         );
         stakesPlaced++;
         totalStakedSats += alloc.amountSats;
@@ -275,18 +209,13 @@ export async function runTreasuryRebalance(): Promise<RebalanceResult | null> {
 }
 
 /**
- * When PL receives yield as a staker, queue it for restaking on the next rebalance.
- * For now, yield already accumulates in the treasury wallet (via yield payout flow).
- * The rebalance job picks it up automatically on the next cycle.
- *
- * This function exists to log the reinvestment intent and check the extraction threshold.
+ * Check yield reinvestment status.
  */
 export async function checkYieldReinvestment(): Promise<{
   totalPlStaked: number;
   totalPlYield: number;
   extractionAllowed: boolean;
 }> {
-  // Sum all active PL stakes
   const [stakeRow] = await db
     .select({ total: sql<number>`COALESCE(SUM(${stakes.amountSats}), 0)::int` })
     .from(stakes)
@@ -294,14 +223,12 @@ export async function checkYieldReinvestment(): Promise<{
 
   const totalPlStaked = stakeRow?.total ?? 0;
 
-  // Sum all treasury records (PL's total accumulated fees)
   const [treasuryRow] = await db
     .select({ total: sql<number>`COALESCE(SUM(${treasury.amountSats}), 0)::int` })
     .from(treasury);
 
   const totalPlYield = treasuryRow?.total ?? 0;
 
-  // Extraction only allowed when pool exceeds threshold
   const extractionAllowed = totalPlStaked >= PL_EXTRACTION_THRESHOLD_SATS;
 
   if (!extractionAllowed) {

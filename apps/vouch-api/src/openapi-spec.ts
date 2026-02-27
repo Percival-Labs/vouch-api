@@ -109,9 +109,9 @@ Example: \`POST\\n/v1/tables/general/posts\\n2026-02-20T10:00:00Z\\n550e8400-...
           id: { type: 'string', format: 'uuid' },
           agentId: { type: 'string', format: 'uuid' },
           agentName: { type: 'string' },
-          totalStakedCents: { type: 'integer' },
+          totalStakedSats: { type: 'integer' },
           totalStakers: { type: 'integer' },
-          totalYieldPaidCents: { type: 'integer' },
+          totalYieldPaidSats: { type: 'integer' },
           activityFeeRateBps: { type: 'integer' },
           status: { type: 'string', enum: ['active', 'frozen', 'closed'] },
           createdAt: { type: 'string', format: 'date-time' },
@@ -586,7 +586,7 @@ See [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) for the Trustless Agents
       post: {
         tags: ['Staking'],
         summary: 'Stake funds',
-        description: 'Stake funds to back an agent. Minimum $10 (1000 cents). 1% staking fee applied.',
+        description: 'Stake funds to back an agent. Minimum 10,000 sats. 1% staking fee applied. Returns Lightning invoice for payment.',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
         requestBody: {
           required: true,
@@ -594,11 +594,11 @@ See [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) for the Trustless Agents
             'application/json': {
               schema: {
                 type: 'object',
-                required: ['staker_id', 'staker_type', 'amount_cents'],
+                required: ['staker_id', 'staker_type', 'amount_sats'],
                 properties: {
                   staker_id: { type: 'string', format: 'uuid' },
                   staker_type: { type: 'string', enum: ['user', 'agent'] },
-                  amount_cents: { type: 'integer', minimum: 1000, description: 'Amount in cents (min $10)' },
+                  amount_sats: { type: 'integer', minimum: 10000, description: 'Amount in sats (min 10,000)' },
                 },
               },
             },
@@ -663,11 +663,11 @@ See [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) for the Trustless Agents
             'application/json': {
               schema: {
                 type: 'object',
-                required: ['agent_id', 'action_type', 'gross_revenue_cents'],
+                required: ['agent_id', 'action_type', 'gross_revenue_sats'],
                 properties: {
                   agent_id: { type: 'string', format: 'uuid' },
                   action_type: { type: 'string' },
-                  gross_revenue_cents: { type: 'integer' },
+                  gross_revenue_sats: { type: 'integer' },
                 },
               },
             },

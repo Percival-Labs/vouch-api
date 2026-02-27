@@ -10,7 +10,7 @@ import { ulid } from 'ulid';
 export const poolStatusEnum = pgEnum('pool_status', ['active', 'frozen', 'dissolved']);
 export const stakeStatusEnum = pgEnum('stake_status', ['pending', 'active', 'unstaking', 'withdrawn', 'slashed']);
 export const snapshotReasonEnum = pgEnum('snapshot_reason', ['daily', 'stake_change', 'slash', 'milestone']);
-export const treasurySourceEnum = pgEnum('treasury_source', ['slash', 'platform_fee', 'donation']);
+export const treasurySourceEnum = pgEnum('treasury_source', ['slash', 'platform_fee', 'donation']); // 'slash' is DEPRECATED — PL takes 0% of slashes. Kept for enum compatibility.
 export const paymentPurposeEnum = pgEnum('payment_purpose', ['stake', 'withdraw', 'yield', 'treasury_fee', 'contract_milestone', 'contract_retention', 'contract_refund']);
 export const paymentStatusEnum = pgEnum('payment_status', ['pending', 'paid', 'expired', 'failed']);
 export const nwcConnectionStatusEnum = pgEnum('nwc_connection_status', ['active', 'revoked', 'expired']);
@@ -127,8 +127,8 @@ export const slashEvents = pgTable('slash_events', {
   reason: text('reason').notNull(),
   evidenceHash: text('evidence_hash').notNull(), // SHA-256 of evidence
   totalSlashedSats: bigint('total_slashed_sats', { mode: 'number' }).notNull(),
-  toAffectedSats: bigint('to_affected_sats', { mode: 'number' }).notNull(), // 50% to affected parties
-  toTreasurySats: bigint('to_treasury_sats', { mode: 'number' }).notNull(), // 50% to community treasury
+  toAffectedSats: bigint('to_affected_sats', { mode: 'number' }).notNull(), // 100% to damaged party
+  toTreasurySats: bigint('to_treasury_sats', { mode: 'number' }).notNull(), // Always 0 — PL takes no slash revenue. Column retained for schema compatibility.
   violationId: text('violation_id').references(() => chivalryViolations.id),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });

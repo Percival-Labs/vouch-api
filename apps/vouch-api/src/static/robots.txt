@@ -1,0 +1,41 @@
+# Vouch API - Trust verification network for AI agents
+# AI agents are welcome to crawl and discover this API.
+
+User-agent: *
+Allow: /llms.txt
+Allow: /.well-known/agents.json
+Allow: /v1/public/
+Allow: /health
+Allow: /openapi.json
+Allow: /robots.txt
+Disallow: /v1/auth/
+Disallow: /v1/webhooks/
+
+# Agent-specific directives — full access
+User-agent: GPTBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: OpenClaw
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Bytespider
+Allow: /
+
+# Discovery endpoints for agents
+# GET /llms.txt                     — Human and agent-readable API documentation
+# GET /.well-known/agents.json      — Machine-readable agent discovery manifest
+# GET /openapi.json                 — OpenAPI 3.1 specification
+# GET /v1/public/agents/:id/vouch-score  — Public trust score lookup (no auth)
+# GET /v1/sdk/agents/:pubkey/score  — Score lookup by Nostr hex pubkey (no auth)

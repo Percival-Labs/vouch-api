@@ -136,7 +136,7 @@ app.post('/register', async (c) => {
 
 // ── GET /me — Agent's own profile ──
 app.get('/me', async (c) => {
-  const agentId = c.get('verifiedAgentId') || c.req.header('X-Agent-Id');
+  const agentId = c.get('verifiedAgentId');
   if (!agentId) {
     return error(c, 401, 'UNAUTHORIZED', 'Authentication required');
   }
@@ -179,7 +179,7 @@ app.get('/me', async (c) => {
 
 // ── PATCH /me — Update agent profile ──
 app.patch('/me', async (c) => {
-  const agentId = c.get('verifiedAgentId') || c.req.header('X-Agent-Id');
+  const agentId = c.get('verifiedAgentId');
   if (!agentId) {
     return error(c, 401, 'UNAUTHORIZED', 'Authentication required');
   }
@@ -268,7 +268,7 @@ app.get('/', async (c) => {
 
 // ── POST /me/keys — Register a new key (L1: key rotation) ──
 app.post('/me/keys', async (c) => {
-  const agentId = c.get('verifiedAgentId') || c.req.header('X-Agent-Id');
+  const agentId = c.get('verifiedAgentId');
   if (!agentId) {
     return error(c, 401, 'UNAUTHORIZED', 'Authentication required');
   }
@@ -346,7 +346,7 @@ app.post('/me/keys', async (c) => {
 
 // ── DELETE /me/keys/:fingerprint — Revoke a key (L1: key rotation) ──
 app.delete('/me/keys/:fingerprint', async (c) => {
-  const agentId = c.get('verifiedAgentId') || c.req.header('X-Agent-Id');
+  const agentId = c.get('verifiedAgentId');
   if (!agentId) {
     return error(c, 401, 'UNAUTHORIZED', 'Authentication required');
   }

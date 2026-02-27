@@ -21,10 +21,15 @@ import tableRoutes from './routes/tables';
 import postRoutes from './routes/posts';
 import trustRoutes from './routes/trust';
 import stakingRoutes from './routes/staking';
+import webhookRoutes from './routes/webhooks';
 import publicRoutes from './routes/public';
-import contractRoutes from './routes/contracts';
+import discoveryRoutes from './routes/discovery';
 import { spec as openapiSpec } from './openapi-spec';
+import contractRoutes from './routes/contracts';
+import { initTreasury, reconcileTreasury, runTreasuryRebalance, checkYieldReinvestment } from './services/treasury-service';
+import { cleanupExpiredPendingStakes } from './services/staking-service';
 import { processRetentionReleases } from './services/contract-service';
+import { takePriceSnapshot } from './services/price-service';
 
 // Combined env supports both Ed25519 (AppEnv) and Nostr (NostrAuthEnv) auth flows
 type CombinedEnv = {
@@ -49,11 +54,15 @@ app.use('*', secureHeaders({
   contentSecurityPolicy: { defaultSrc: ["'none'"] },
   strictTransportSecurity: 'max-age=31536000; includeSubDomains',
 })); // X-Content-Type-Options, X-Frame-Options, CSP, HSTS (H4)
+const ALLOWED_ORIGINS = (process.env.VOUCH_CORS_ORIGINS || 'http://localhost:3600')
+  .split(',')
+  .map(s => s.trim());
+
 app.use('*', cors({
-  origin: process.env.VOUCH_CORS_ORIGIN || 'http://localhost:3600', // Vouch frontend (H5)
+  origin: (origin) => ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
   allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization', 'X-Agent-Id', 'X-Timestamp', 'X-Signature', 'X-Nonce', 'Cookie'],
-  exposeHeaders: ['Set-Cookie'],
+  exposeHeaders: ['Set-Cookie', 'X-Vouch-API-Version', 'X-Vouch-Docs', 'X-Vouch-LLMs-Txt'],
   maxAge: 3600,
   credentials: true,
 }));
@@ -61,6 +70,14 @@ app.use('*', bodyLimit({ maxSize: 1024 * 1024 })); // 1MB max body (L5)
 
 // ── Request logging ──
 app.use('*', logger());
+
+// ── Agent discoverability headers (added to ALL responses) ──
+app.use('*', async (c, next) => {
+  await next();
+  c.res.headers.set('X-Vouch-API-Version', '0.2.1');
+  c.res.headers.set('X-Vouch-Docs', 'https://percival-labs.ai/research');
+  c.res.headers.set('X-Vouch-LLMs-Txt', 'https://percivalvouch-api-production.up.railway.app/llms.txt');
+});
 
 // ── Global rate limiting (H3) ──
 app.use('/v1/*', rateLimiter('global'));
@@ -83,6 +100,9 @@ app.get('/openapi.json', (c) => {
   return c.json(openapiSpec);
 });
 
+// ── Agent discovery routes (no auth, served before all middleware) ──
+app.route('', discoveryRoutes);
+
 // ── Public endpoint rate limiting (IP-based, 60 req/min, no auth required) ──
 app.use('/v1/public/*', rateLimiter('public'));
 
@@ -95,7 +115,11 @@ app.use('/v1/auth/login', rateLimiter('auth_login'));
 // ── H10 fix: SDK registration rate limit (5/hour, must be before auth middleware) ──
 app.use('/v1/sdk/agents/register', rateLimiter('registration'));
 
-// ── Nostr NIP-98 auth for SDK routes + contract routes ──
+// ── Webhook routes (mounted BEFORE auth middleware — webhooks use shared secret) ──
+app.use('/v1/webhooks/*', rateLimiter('global'));
+app.route('/v1/webhooks', webhookRoutes);
+
+// ── Nostr NIP-98 auth for SDK routes ──
 // Applied before Ed25519 middleware. SDK routes use Authorization: Nostr header.
 // The middleware skips /v1/public/* and /v1/auth/* internally.
 app.use('/v1/sdk/*', verifyNostrAuth);
@@ -130,7 +154,7 @@ app.route('/v1/agents', agentRoutes);
 app.route('/v1/tables', tableRoutes);
 app.route('/v1/trust', trustRoutes);
 app.route('/v1/staking', stakingRoutes);
-app.route('/v1/contracts', contractRoutes); // Contract system (NIP-98 auth)
+app.route('/v1/contracts', contractRoutes);    // Contract work agreements (NIP-98 auth)
 app.route('/v1', postRoutes); // posts handles /tables/:slug/posts, /posts/:id, /comments/:id/vote
 
 // ── Nonce cleanup cron (every 5 minutes) ──
@@ -145,16 +169,74 @@ if (nonceCleanupInterval && typeof nonceCleanupInterval === 'object' && 'unref' 
   nonceCleanupInterval.unref();
 }
 
-// ── Retention release cron (daily — checks for contracts past retention period) ──
-const retentionInterval = setInterval(async () => {
+// ── Pending stake cleanup cron (every 5 minutes, S9 fix) ──
+const pendingStakeCleanupInterval = setInterval(async () => {
+  try {
+    await cleanupExpiredPendingStakes();
+  } catch (e) {
+    console.error('[vouch-api] Pending stake cleanup error:', e);
+  }
+}, 5 * 60 * 1000);
+if (pendingStakeCleanupInterval && typeof pendingStakeCleanupInterval === 'object' && 'unref' in pendingStakeCleanupInterval) {
+  pendingStakeCleanupInterval.unref();
+}
+
+// ── Initialize Treasury wallet (non-blocking) ──
+initTreasury().catch((err) => {
+  console.warn('[vouch-api] Treasury init failed (Lightning payments unavailable):', err instanceof Error ? err.message : err);
+});
+
+// ── Treasury reconciliation interval (every 30 minutes) ──
+const treasuryReconcileInterval = setInterval(async () => {
+  try {
+    await reconcileTreasury();
+  } catch (e) {
+    console.error('[vouch-api] Treasury reconciliation error:', e);
+  }
+}, 30 * 60 * 1000);
+if (treasuryReconcileInterval && typeof treasuryReconcileInterval === 'object' && 'unref' in treasuryReconcileInterval) {
+  treasuryReconcileInterval.unref();
+}
+
+// ── Daily BTC price snapshot (every 24 hours) ──
+const priceSnapshotInterval = setInterval(async () => {
+  try {
+    await takePriceSnapshot('scheduled');
+  } catch (e) {
+    console.error('[vouch-api] Price snapshot error:', e);
+  }
+}, 24 * 60 * 60 * 1000);
+if (priceSnapshotInterval && typeof priceSnapshotInterval === 'object' && 'unref' in priceSnapshotInterval) {
+  priceSnapshotInterval.unref();
+}
+// Take initial snapshot on startup (non-blocking)
+takePriceSnapshot('startup').catch((e) => {
+  console.warn('[vouch-api] Initial price snapshot failed:', e instanceof Error ? e.message : e);
+});
+
+// ── Contract retention release (daily) ──
+const retentionReleaseInterval = setInterval(async () => {
   try {
     await processRetentionReleases();
   } catch (e) {
     console.error('[vouch-api] Retention release error:', e);
   }
 }, 24 * 60 * 60 * 1000);
-if (retentionInterval && typeof retentionInterval === 'object' && 'unref' in retentionInterval) {
-  retentionInterval.unref();
+if (retentionReleaseInterval && typeof retentionReleaseInterval === 'object' && 'unref' in retentionReleaseInterval) {
+  retentionReleaseInterval.unref();
+}
+
+// ── PL Treasury rebalance (every 24 hours) ──
+const treasuryRebalanceInterval = setInterval(async () => {
+  try {
+    await checkYieldReinvestment();
+    await runTreasuryRebalance();
+  } catch (e) {
+    console.error('[vouch-api] Treasury rebalance error:', e);
+  }
+}, 24 * 60 * 60 * 1000);
+if (treasuryRebalanceInterval && typeof treasuryRebalanceInterval === 'object' && 'unref' in treasuryRebalanceInterval) {
+  treasuryRebalanceInterval.unref();
 }
 
 // ── Start server ──
@@ -163,6 +245,8 @@ const port = parseInt(process.env.PORT || '3601', 10);
 console.log(`[vouch-api] Starting on port ${port}`);
 console.log(`[vouch-api] Auth: ${process.env.VOUCH_SKIP_AUTH === 'true' ? 'BYPASSED (test mode)' : 'enabled'}`);
 console.log(`[vouch-api] DATABASE_URL: ${process.env.DATABASE_URL ? 'configured' : 'NOT SET'}`);
+console.log(`[vouch-api] NWC_URL: ${process.env.NWC_URL ? 'configured' : 'NOT SET (treasury will be unavailable)'}`);
+console.log(`[vouch-api] ENCRYPTION_KEY: ${process.env.ENCRYPTION_KEY ? 'configured' : 'NOT SET (NWC storage will fail)'}`);
 
 export default {
   port,

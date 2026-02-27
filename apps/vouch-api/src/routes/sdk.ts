@@ -189,8 +189,8 @@ app.get('/:hexPubkey/score', async (c) => {
     return success(c, {
       score: breakdown.composite,
       dimensions: breakdown.dimensions,
-      backed: (pool?.totalStakedCents ?? 0) > 0,
-      pool_sats: Math.round((pool?.totalStakedCents ?? 0) / 100 * 100000), // cents → approx sats
+      backed: (pool?.totalStakedSats ?? 0) > 0,
+      pool_sats: pool?.totalStakedSats ?? 0,
       staker_count: pool?.totalStakers ?? 0,
       performance: {
         success_rate: performance.successRate,

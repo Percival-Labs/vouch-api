@@ -48,6 +48,12 @@ export const verifySignature: MiddlewareHandler<AppEnv> = async (c, next) => {
     return;
   }
 
+  // Skip auth for webhook routes (use shared secret instead)
+  if (c.req.path.startsWith('/v1/webhooks/')) {
+    await next();
+    return;
+  }
+
   // Skip Ed25519 auth for outcome routes (use NIP-98 Nostr auth)
   if (c.req.path.startsWith('/v1/outcomes')) {
     await next();

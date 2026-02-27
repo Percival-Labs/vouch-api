@@ -144,10 +144,9 @@ function validateNip98Event(
     return 'Missing required "method" tag';
   }
 
-  // URL comparison: match pathname only (origin may differ behind reverse proxies
-  // like Railway, Cloudflare, etc. where the server sees internal URLs).
-  // Pathname matching is sufficient for NIP-98 security (prevents auth event reuse
-  // across different endpoints).
+  // URL comparison: match origin + pathname (ignore query params for flexibility)
+  // The spec says the "u" tag must match the absolute URL of the request.
+  // We compare normalized URLs to handle trailing slashes and case differences.
   let eventUrl: URL;
   let reqUrl: URL;
   try {
@@ -157,8 +156,12 @@ function validateNip98Event(
     return `Invalid URL in "u" tag or request: ${urlTag[1]}`;
   }
 
-  if (eventUrl.pathname !== reqUrl.pathname) {
-    return `URL path mismatch: event has "${eventUrl.pathname}", request is "${reqUrl.pathname}"`;
+  // Compare origin + pathname (case-insensitive origin, exact pathname)
+  if (
+    eventUrl.origin.toLowerCase() !== reqUrl.origin.toLowerCase() ||
+    eventUrl.pathname !== reqUrl.pathname
+  ) {
+    return `URL mismatch: event has "${urlTag[1]}", request is "${requestUrl}"`;
   }
 
   // Method comparison (case-insensitive)
@@ -216,6 +219,12 @@ export const verifyNostrAuth: MiddlewareHandler<NostrAuthEnv> = async (c, next) 
 
   // Skip auth for user-facing auth endpoints (cookie/JWT based)
   if (c.req.path.startsWith('/v1/auth/')) {
+    await next();
+    return;
+  }
+
+  // Skip auth for webhook routes (use shared secret instead)
+  if (c.req.path.startsWith('/v1/webhooks/')) {
     await next();
     return;
   }
