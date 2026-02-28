@@ -258,6 +258,11 @@ outcomeRoutes.post('/', async (c) => {
 
     return success(c, result, 201);
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // H7 fix: return 409 for duplicate outcome submissions
+    if (message.includes('Duplicate outcome') || message.includes('unique constraint') || message.includes('idx_outcomes_agent_task_role')) {
+      return error(c, 409, 'DUPLICATE_OUTCOME' as any, 'Outcome already reported for this task and role');
+    }
     console.error('[sdk] POST /outcomes error:', err);
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to report outcome');
   }

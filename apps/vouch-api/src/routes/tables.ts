@@ -97,48 +97,63 @@ app.post('/:slug/join', async (c) => {
   }
 
   try {
-    // Find the table
-    const table = await db.select().from(tables).where(eq(tables.slug, slug)).limit(1);
-    if (table.length === 0) {
+    // H11 fix: wrap entire join operation in a transaction to prevent race conditions
+    // (duplicate memberships and desynced subscriber counts)
+    const result = await db.transaction(async (tx) => {
+      // Find the table
+      const table = await tx.select().from(tables).where(eq(tables.slug, slug)).limit(1);
+      if (table.length === 0) {
+        return { error: 'NOT_FOUND' as const };
+      }
+
+      // Paid tables require subscription — skip for now
+      if (table[0].type === 'paid') {
+        return { error: 'PAYMENT_REQUIRED' as const };
+      }
+
+      // Check if already a member (within transaction for consistency)
+      const existing = await tx.select().from(memberships).where(
+        and(
+          eq(memberships.tableId, table[0].id),
+          eq(memberships.memberId, agentId),
+          eq(memberships.memberType, 'agent'),
+        ),
+      ).limit(1);
+
+      if (existing.length > 0) {
+        return { error: 'ALREADY_MEMBER' as const };
+      }
+
+      // Insert membership + increment count atomically
+      const [membership] = await tx.insert(memberships).values({
+        tableId: table[0].id,
+        memberId: agentId,
+        memberType: 'agent',
+        role: 'member',
+      }).returning();
+
+      await tx.update(tables)
+        .set({ subscriberCount: sql`${tables.subscriberCount} + 1` })
+        .where(eq(tables.id, table[0].id));
+
+      return { membership };
+    });
+
+    if (result.error === 'NOT_FOUND') {
       return error(c, 404, 'NOT_FOUND', `Table "${slug}" not found`);
     }
-
-    // Check if already a member
-    const existing = await db.select().from(memberships).where(
-      and(
-        eq(memberships.tableId, table[0].id),
-        eq(memberships.memberId, agentId),
-        eq(memberships.memberType, 'agent'),
-      ),
-    ).limit(1);
-
-    if (existing.length > 0) {
+    if (result.error === 'PAYMENT_REQUIRED') {
+      return error(c, 402, 'PAYMENT_REQUIRED' as any, 'Paid table subscriptions not yet supported for agents');
+    }
+    if (result.error === 'ALREADY_MEMBER') {
       return error(c, 409, 'ALREADY_MEMBER', 'Agent is already a member of this table');
     }
 
-    // Paid tables require subscription — skip for now
-    if (table[0].type === 'paid') {
-      return error(c, 402, 'PAYMENT_REQUIRED' as any, 'Paid table subscriptions not yet supported for agents');
-    }
-
-    // Insert membership
-    const [membership] = await db.insert(memberships).values({
-      tableId: table[0].id,
-      memberId: agentId,
-      memberType: 'agent',
-      role: 'member',
-    }).returning();
-
-    // Increment subscriber count
-    await db.update(tables)
-      .set({ subscriberCount: sql`${tables.subscriberCount} + 1` })
-      .where(eq(tables.id, table[0].id));
-
     return success(c, {
-      membership_id: membership.id,
+      membership_id: result.membership!.id,
       table_slug: slug,
-      role: membership.role,
-      joined_at: membership.joinedAt.toISOString(),
+      role: result.membership!.role,
+      joined_at: result.membership!.joinedAt.toISOString(),
     }, 201);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -157,27 +172,39 @@ app.post('/:slug/leave', async (c) => {
   }
 
   try {
-    const table = await db.select().from(tables).where(eq(tables.slug, slug)).limit(1);
-    if (table.length === 0) {
+    // H11 fix: wrap entire leave operation in a transaction to prevent race conditions
+    const result = await db.transaction(async (tx) => {
+      const table = await tx.select().from(tables).where(eq(tables.slug, slug)).limit(1);
+      if (table.length === 0) {
+        return { error: 'NOT_FOUND' as const };
+      }
+
+      const deleted = await tx.delete(memberships).where(
+        and(
+          eq(memberships.tableId, table[0].id),
+          eq(memberships.memberId, agentId),
+          eq(memberships.memberType, 'agent'),
+        ),
+      ).returning();
+
+      if (deleted.length === 0) {
+        return { error: 'NOT_MEMBER' as const };
+      }
+
+      // Decrement subscriber count atomically within transaction
+      await tx.update(tables)
+        .set({ subscriberCount: sql`GREATEST(${tables.subscriberCount} - 1, 0)` })
+        .where(eq(tables.id, table[0].id));
+
+      return { left: true };
+    });
+
+    if (result.error === 'NOT_FOUND') {
       return error(c, 404, 'NOT_FOUND', `Table "${slug}" not found`);
     }
-
-    const deleted = await db.delete(memberships).where(
-      and(
-        eq(memberships.tableId, table[0].id),
-        eq(memberships.memberId, agentId),
-        eq(memberships.memberType, 'agent'),
-      ),
-    ).returning();
-
-    if (deleted.length === 0) {
+    if (result.error === 'NOT_MEMBER') {
       return error(c, 404, 'NOT_MEMBER', 'Agent is not a member of this table');
     }
-
-    // Decrement subscriber count
-    await db.update(tables)
-      .set({ subscriberCount: sql`GREATEST(${tables.subscriberCount} - 1, 0)` })
-      .where(eq(tables.id, table[0].id));
 
     return success(c, { left: true, table_slug: slug });
   } catch (err) {

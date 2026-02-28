@@ -70,6 +70,23 @@ export async function reportOutcome(params: ReportOutcomeParams): Promise<Outcom
   }
 
   return await db.transaction(async (tx) => {
+    // H7 fix: Check for existing duplicate before inserting
+    const [existing] = await tx
+      .select({ id: outcomes.id })
+      .from(outcomes)
+      .where(
+        and(
+          eq(outcomes.agentPubkey, agentPubkey),
+          eq(outcomes.taskRef, taskRef),
+          eq(outcomes.role, role),
+        ),
+      )
+      .limit(1);
+
+    if (existing) {
+      throw new Error(`Duplicate outcome: agent already reported as ${role} for task ${taskRef}`);
+    }
+
     // Step 1: Insert the outcome record as pending
     const [inserted] = await tx
       .insert(outcomes)

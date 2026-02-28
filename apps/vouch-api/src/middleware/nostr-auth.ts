@@ -144,12 +144,14 @@ function validateNip98Event(
     return 'Missing required "method" tag';
   }
 
-  // URL comparison: match pathname only (ignore origin and query params).
+  // URL comparison: match pathname + query params (ignore origin/scheme).
   // Behind reverse proxies (Railway, Cloudflare), c.req.url has the internal
   // origin (e.g. http://0.0.0.0:3601) while the NIP-98 event signs the external
   // URL (e.g. https://percivalvouch-api-production.up.railway.app).
-  // Pathname-only comparison is safe because the signature binds the full URL
+  // Origin-agnostic comparison is safe because the signature binds the full URL
   // and the server only serves one app per path prefix.
+  // H2 fix: also compare query params to prevent request forgery across endpoints
+  // sharing the same pathname but differing by query string.
   let eventUrl: URL;
   let reqUrl: URL;
   try {
@@ -161,6 +163,17 @@ function validateNip98Event(
 
   if (eventUrl.pathname !== reqUrl.pathname) {
     return `URL mismatch: event path "${eventUrl.pathname}", request path "${reqUrl.pathname}"`;
+  }
+
+  // Compare sorted query params to avoid ordering differences
+  if (eventUrl.search !== reqUrl.search) {
+    const eventParams = new URLSearchParams(eventUrl.search);
+    const reqParams = new URLSearchParams(reqUrl.search);
+    eventParams.sort();
+    reqParams.sort();
+    if (eventParams.toString() !== reqParams.toString()) {
+      return `URL query mismatch: event "${eventUrl.search}", request "${reqUrl.search}"`;
+    }
   }
 
   // Method comparison (case-insensitive)
