@@ -79,9 +79,6 @@ const mockPool = {
   totalSlashedSats: 0,
   activityFeeRateBps: 500,
   status: 'active' as const,
-  lnbitsWalletId: null,
-  lnbitsAdminKey: null,
-  lnbitsInvoiceKey: null,
   createdAt: new Date('2026-01-01'),
 };
 
