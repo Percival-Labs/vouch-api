@@ -191,10 +191,13 @@ app.post('/wallet/connect', async (c) => {
       return error(c, 400, 'VALIDATION_ERROR', 'budget_sats must be a positive number');
     }
 
-    // Verify the pending stake belongs to this user
-    const stakeRecord = await getStakeStatus(stake_id);
+    // Verify the pending stake exists and belongs to this user
+    const [stakeRecord] = await db.select({ stakerId: stakes.stakerId, status: stakes.status }).from(stakes).where(eq(stakes.id, stake_id)).limit(1);
     if (!stakeRecord) {
       return error(c, 404, 'NOT_FOUND', 'Stake not found');
+    }
+    if (stakeRecord.stakerId !== authenticatedId) {
+      return error(c, 403, 'FORBIDDEN', 'Cannot finalize another user\'s stake');
     }
 
     // Create NWC connection (validates wallet is reachable)
