@@ -29,6 +29,7 @@ export interface WotSnapshot {
   sybilClassification: SybilClassification | null;
   sybilConfidence: number | null;
   fetchedAt: Date;
+  partial: boolean; // true if score or sybil data is missing/failed
 }
 
 const DEFAULT_WOT_BASE_URL = 'https://wot.klabo.world';
@@ -79,7 +80,7 @@ function normalizeClassification(value: string | null | undefined): SybilClassif
 }
 
 function wotEnabled(): boolean {
-  return parseBoolEnv('WOT_ENABLED', true);
+  return parseBoolEnv('WOT_ENABLED', false);
 }
 
 function wotBaseUrl(): string {
@@ -101,6 +102,8 @@ function wotCommunityWeight(): number {
 function wotVerificationBonusMax(): number {
   return parseIntEnv('WOT_VERIFICATION_BONUS_MAX', DEFAULT_VERIFICATION_BONUS_MAX, 0, 300);
 }
+
+const inflightRequests = new Map<string, Promise<WotSnapshot | null>>();
 
 function toErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -174,7 +177,7 @@ export function computeWotVerificationBonus(snapshot: WotSnapshot): number {
       ? 0.8
       : snapshot.sybilClassification === 'suspicious'
         ? 0.3
-        : 0.6;
+        : 0.0;
 
   const confidence = clamp(snapshot.sybilConfidence ?? 0.5, 0, 1);
   const trustStrength = normalizeWotCommunityScore(snapshot.score) / 1000;
@@ -189,6 +192,19 @@ export async function getWotSnapshot(pubkey: string): Promise<WotSnapshot | null
   const normalizedPubkey = pubkey.trim().toLowerCase();
   if (!isValidHexPubkey(normalizedPubkey)) return null;
 
+  const existing = inflightRequests.get(normalizedPubkey);
+  if (existing) return existing;
+
+  const promise = getWotSnapshotInternal(normalizedPubkey);
+  inflightRequests.set(normalizedPubkey, promise);
+  try {
+    return await promise;
+  } finally {
+    inflightRequests.delete(normalizedPubkey);
+  }
+}
+
+async function getWotSnapshotInternal(normalizedPubkey: string): Promise<WotSnapshot | null> {
   const cutoff = new Date(Date.now() - (wotCacheTtlHours() * 60 * 60 * 1000));
 
   const [freshCache] = await db.select()
@@ -200,7 +216,7 @@ export async function getWotSnapshot(pubkey: string): Promise<WotSnapshot | null
     .limit(1);
 
   if (freshCache) {
-    return mapRowToSnapshot(freshCache);
+    return { ...mapRowToSnapshot(freshCache), partial: false };
   }
 
   const [staleCache] = await db.select()
@@ -216,6 +232,7 @@ export async function getWotSnapshot(pubkey: string): Promise<WotSnapshot | null
 
   const scorePayload = scoreResult.status === 'fulfilled' ? scoreResult.value : null;
   const sybilPayload = sybilResult.status === 'fulfilled' ? sybilResult.value : null;
+  const partial = !scorePayload || !sybilPayload;
 
   if (!scorePayload && !sybilPayload) {
     if (scoreResult.status === 'rejected') {
@@ -224,7 +241,10 @@ export async function getWotSnapshot(pubkey: string): Promise<WotSnapshot | null
     if (sybilResult.status === 'rejected') {
       console.warn(`[wot] sybil lookup failed for ${normalizedPubkey}: ${toErrorMessage(sybilResult.reason)}`);
     }
-    return staleCache ? mapRowToSnapshot(staleCache) : null;
+    if (staleCache) {
+      return { ...mapRowToSnapshot(staleCache), partial: true };
+    }
+    return null;
   }
 
   const now = new Date();
@@ -238,6 +258,7 @@ export async function getWotSnapshot(pubkey: string): Promise<WotSnapshot | null
     sybilClassification: normalizeClassification(sybilPayload?.classification ?? staleCache?.sybilClassification),
     sybilConfidence: sybilPayload?.confidence ?? staleCache?.sybilConfidence ?? null,
     fetchedAt: now,
+    partial,
   };
 
   await db.insert(wotScoreCache).values({
