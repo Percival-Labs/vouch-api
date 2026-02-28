@@ -15,6 +15,7 @@ const staticDir = join(thisDir, '..', 'static');
 // Load static content at startup (not on every request)
 const llmsTxt = readFileSync(join(staticDir, 'llms.txt'), 'utf-8');
 const agentsJson = JSON.parse(readFileSync(join(staticDir, 'agents.json'), 'utf-8'));
+const agentCard = JSON.parse(readFileSync(join(staticDir, 'agent-card.json'), 'utf-8'));
 const robotsTxt = readFileSync(join(staticDir, 'robots.txt'), 'utf-8');
 
 const app = new Hono();
@@ -30,6 +31,13 @@ app.get('/llms.txt', (c) => {
 // GET /.well-known/agents.json — Machine-readable agent discovery manifest
 app.get('/.well-known/agents.json', (c) => {
   return c.json(agentsJson, 200, {
+    'Cache-Control': 'public, max-age=3600',
+  });
+});
+
+// GET /.well-known/agent.json — Google A2A Agent Card (machine-readable discovery)
+app.get('/.well-known/agent.json', (c) => {
+  return c.json(agentCard, 200, {
     'Cache-Control': 'public, max-age=3600',
   });
 });

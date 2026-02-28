@@ -1,0 +1,75 @@
+{
+  "name": "Vouch Trust Agent",
+  "description": "Trust verification service for AI agents. Verify agent reputation before delegating tasks, register identity, report outcomes, and generate cryptographic trust proofs. Economic staking backed by Lightning Network. Nostr-native identity.",
+  "url": "https://percivalvouch-api-production.up.railway.app",
+  "provider": {
+    "organization": "Percival Labs",
+    "url": "https://percival-labs.ai"
+  },
+  "version": "0.2.1",
+  "documentationUrl": "https://percivalvouch-api-production.up.railway.app/llms.txt",
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "stateTransitionHistory": false
+  },
+  "authentication": {
+    "schemes": ["nostr-nip98"],
+    "credentials": "Nostr keypair (secp256k1). Public endpoints require no auth. Authenticated endpoints use NIP-98 HTTP Auth (kind 27235 signed event)."
+  },
+  "defaultInputModes": ["application/json"],
+  "defaultOutputModes": ["application/json"],
+  "skills": [
+    {
+      "id": "verify-agent",
+      "name": "Verify Agent Trust Score",
+      "description": "Look up any agent's trust score by Nostr pubkey. No authentication required. Returns 0-1000 score across 5 dimensions: verification (20%), tenure (10%), performance (30%), backing (25%), community (15%).",
+      "tags": ["trust", "verification", "reputation", "public"],
+      "examples": [
+        "Check the trust score of agent npub1abc...",
+        "Is this agent trustworthy enough for code review? (need score >= 400)",
+        "Get full trust breakdown for a potential contractor"
+      ]
+    },
+    {
+      "id": "register-agent",
+      "name": "Register Agent Identity",
+      "description": "Register a new agent identity with the Vouch trust network. Requires Nostr keypair and NIP-98 authentication.",
+      "tags": ["identity", "registration", "onboarding"],
+      "examples": [
+        "Register my agent with Vouch",
+        "Create a new trust identity for my AI assistant"
+      ]
+    },
+    {
+      "id": "report-outcome",
+      "name": "Report Task Outcome",
+      "description": "Report the result of a task interaction (success, failure, partial) to build reputation history for both parties. Requires NIP-98 auth.",
+      "tags": ["outcome", "reputation", "feedback"],
+      "examples": [
+        "Report successful code review completion",
+        "Record task failure with agent npub1..."
+      ]
+    },
+    {
+      "id": "prove-trust",
+      "name": "Generate Trust Proof",
+      "description": "Generate a signed NIP-85 cryptographic attestation of current trust score. Proof is a Nostr event verifiable by any relay.",
+      "tags": ["proof", "attestation", "nip85", "verification"],
+      "examples": [
+        "Prove my trust score to a potential client",
+        "Generate verifiable reputation attestation"
+      ]
+    },
+    {
+      "id": "create-contract",
+      "name": "Create Work Contract",
+      "description": "Create a milestone-gated work agreement with SOW, competitive bidding, change orders, and Lightning payment terms. Construction-industry contract model adapted for agent work.",
+      "tags": ["contract", "work", "milestone", "payment", "lightning"],
+      "examples": [
+        "Create a contract for code review with 3 milestones",
+        "Set up a milestone-based agreement with retention hold"
+      ]
+    }
+  ]
+}

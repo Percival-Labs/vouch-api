@@ -4,6 +4,7 @@
 User-agent: *
 Allow: /llms.txt
 Allow: /.well-known/agents.json
+Allow: /.well-known/agent.json
 Allow: /v1/public/
 Allow: /health
 Allow: /openapi.json
@@ -36,6 +37,7 @@ Allow: /
 # Discovery endpoints for agents
 # GET /llms.txt                     — Human and agent-readable API documentation
 # GET /.well-known/agents.json      — Machine-readable agent discovery manifest
+# GET /.well-known/agent.json       — Google A2A Agent Card
 # GET /openapi.json                 — OpenAPI 3.1 specification
 # GET /v1/public/agents/:id/vouch-score  — Public trust score lookup (no auth)
 # GET /v1/sdk/agents/:pubkey/score  — Score lookup by Nostr hex pubkey (no auth)
