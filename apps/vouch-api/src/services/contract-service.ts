@@ -109,6 +109,10 @@ async function logEvent(
  * Each criterion must have id, criterion (4-20 words), verify, priority.
  * IDs must be unique. Criterion text under 100 chars. At least one criterion required.
  */
+const MAX_CRITERIA = 50;
+const MAX_ANTI_CRITERIA = 20;
+const ID_PATTERN = /^[CA]\d{1,3}$/;
+
 export function validateISC(isc: MilestoneISC): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
 
@@ -117,11 +121,23 @@ export function validateISC(isc: MilestoneISC): { valid: boolean; errors: string
     return { valid: false, errors };
   }
 
+  if (isc.criteria.length > MAX_CRITERIA) {
+    errors.push(`Too many criteria (max ${MAX_CRITERIA}, got ${isc.criteria.length})`);
+    return { valid: false, errors };
+  }
+
+  if (isc.antiCriteria && isc.antiCriteria.length > MAX_ANTI_CRITERIA) {
+    errors.push(`Too many anti-criteria (max ${MAX_ANTI_CRITERIA}, got ${isc.antiCriteria.length})`);
+    return { valid: false, errors };
+  }
+
   const seenIds = new Set<string>();
 
   for (const c of isc.criteria) {
     if (!c.id) {
       errors.push('Each criterion must have an id');
+    } else if (!ID_PATTERN.test(c.id)) {
+      errors.push(`Criterion id "${c.id}" must match format C1, C2, ... C999`);
     } else if (seenIds.has(c.id)) {
       errors.push(`Duplicate criterion id: ${c.id}`);
     } else {
@@ -131,6 +147,10 @@ export function validateISC(isc: MilestoneISC): { valid: boolean; errors: string
     if (!c.criterion) {
       errors.push(`Criterion ${c.id || '?'}: criterion text is required`);
     } else {
+      const sanitized = c.criterion.replace(/<[^>]*>/g, '');
+      if (sanitized.length !== c.criterion.length) {
+        errors.push(`Criterion ${c.id || '?'}: HTML tags not allowed`);
+      }
       if (c.criterion.length > 100) {
         errors.push(`Criterion ${c.id || '?'}: text must be under 100 characters`);
       }
@@ -142,6 +162,8 @@ export function validateISC(isc: MilestoneISC): { valid: boolean; errors: string
 
     if (!c.verify) {
       errors.push(`Criterion ${c.id || '?'}: verify method is required`);
+    } else if (c.verify.length > 200) {
+      errors.push(`Criterion ${c.id || '?'}: verify method must be under 200 characters`);
     }
 
     if (!c.priority || !['critical', 'important', 'nice'].includes(c.priority)) {
@@ -153,6 +175,8 @@ export function validateISC(isc: MilestoneISC): { valid: boolean; errors: string
     for (const a of isc.antiCriteria) {
       if (!a.id) {
         errors.push('Each anti-criterion must have an id');
+      } else if (!ID_PATTERN.test(a.id)) {
+        errors.push(`Anti-criterion id "${a.id}" must match format A1, A2, ... A999`);
       } else if (seenIds.has(a.id)) {
         errors.push(`Duplicate criterion/anti-criterion id: ${a.id}`);
       } else {
@@ -161,6 +185,11 @@ export function validateISC(isc: MilestoneISC): { valid: boolean; errors: string
 
       if (!a.criterion) {
         errors.push(`Anti-criterion ${a.id || '?'}: criterion text is required`);
+      } else {
+        const sanitized = a.criterion.replace(/<[^>]*>/g, '');
+        if (sanitized.length !== a.criterion.length) {
+          errors.push(`Anti-criterion ${a.id || '?'}: HTML tags not allowed`);
+        }
       }
 
       if (!a.verify) {
@@ -170,6 +199,32 @@ export function validateISC(isc: MilestoneISC): { valid: boolean; errors: string
   }
 
   return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Strip status and evidence fields from ISC input.
+ * Used by updateMilestoneISC to prevent agents from pre-setting
+ * criteria to 'passed' or anti-criteria to 'avoided' via the PUT endpoint.
+ * Status changes must only happen through submit/accept flows.
+ */
+function sanitizeISCForUpdate(isc: MilestoneISC): MilestoneISC {
+  return {
+    criteria: isc.criteria.map(c => ({
+      id: c.id,
+      criterion: c.criterion,
+      verify: c.verify,
+      priority: c.priority,
+      status: 'pending' as const,
+      // evidence stripped — only set during submit flow
+    })),
+    antiCriteria: isc.antiCriteria?.map(a => ({
+      id: a.id,
+      criterion: a.criterion,
+      verify: a.verify,
+      status: 'avoided' as const,
+      // evidence stripped
+    })),
+  };
 }
 
 /**
@@ -550,6 +605,13 @@ export async function submitMilestone(
     // Process ISC evidence if milestone has ISC criteria and evidence is provided
     let updatedIsc = milestone.iscCriteria as MilestoneISC | null;
     if (updatedIsc && evidence) {
+      // Service-layer evidence validation (ISC-S5: defense-in-depth beyond Zod)
+      for (const [key, val] of Object.entries(evidence)) {
+        if (typeof val !== 'string' || val.length > 2000) {
+          throw new Error(`Evidence for "${key}" exceeds 2000 character limit`);
+        }
+      }
+
       // Update each criterion's evidence and status
       updatedIsc = {
         ...updatedIsc,
@@ -1420,15 +1482,18 @@ export async function updateMilestoneISC(
 
     if (!milestone) throw new Error('Milestone not found');
 
+    // Sanitize: strip status/evidence to prevent pre-setting via PUT (ISC-S1 fix)
+    const sanitized = sanitizeISCForUpdate(isc);
+
     // Validate ISC structure
-    const validation = validateISC(isc);
+    const validation = validateISC(sanitized);
     if (!validation.valid) {
       throw new Error(`ISC validation failed: ${validation.errors.join('; ')}`);
     }
 
     await tx
       .update(contractMilestones)
-      .set({ iscCriteria: isc })
+      .set({ iscCriteria: sanitized })
       .where(eq(contractMilestones.id, milestoneId));
   });
 }

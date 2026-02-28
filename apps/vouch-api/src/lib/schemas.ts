@@ -266,7 +266,28 @@ export const UpdateContractSchema = z.object({
 export const SubmitMilestoneSchema = z.object({
   deliverable_url: z.string().max(2000).optional(),
   deliverable_notes: z.string().max(5000).optional(),
-  isc_evidence: z.record(z.string(), z.string().max(2000)).optional(),
+  isc_evidence: z.record(
+    z.string().regex(/^[CA]\d{1,3}$/, "Evidence key must be a valid criterion ID (e.g., C1, A2)"),
+    z.string().max(2000, "Evidence text must be at most 2000 characters"),
+  ).optional(),
+});
+
+const ISCCriterionSchema = z.object({
+  id: z.string().regex(/^C\d{1,3}$/, "ID must match C1, C2, ... C999"),
+  criterion: z.string().min(1).max(100).refine(s => !/<[^>]*>/.test(s), "HTML tags not allowed"),
+  verify: z.string().min(1).max(200),
+  priority: z.enum(["critical", "important", "nice"]),
+});
+
+const ISCAntiCriterionSchema = z.object({
+  id: z.string().regex(/^A\d{1,3}$/, "ID must match A1, A2, ... A999"),
+  criterion: z.string().min(1).max(100).refine(s => !/<[^>]*>/.test(s), "HTML tags not allowed"),
+  verify: z.string().min(1).max(200),
+});
+
+export const UpdateISCSchema = z.object({
+  criteria: z.array(ISCCriterionSchema).min(1, "At least one criterion required").max(50, "Max 50 criteria"),
+  antiCriteria: z.array(ISCAntiCriterionSchema).max(20, "Max 20 anti-criteria").optional(),
 });
 
 export const RejectMilestoneSchema = z.object({
