@@ -88,6 +88,7 @@ export const contractMilestones = pgTable('contract_milestones', {
   isRetention: boolean('is_retention').default(false).notNull(),
   deliverableUrl: text('deliverable_url'),
   deliverableNotes: text('deliverable_notes'),
+  iscCriteria: jsonb('isc_criteria'), // MilestoneISC structure
   paymentHash: text('payment_hash'),
   submittedAt: timestamp('submitted_at'),
   acceptedAt: timestamp('accepted_at'),

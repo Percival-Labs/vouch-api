@@ -266,6 +266,7 @@ export const UpdateContractSchema = z.object({
 export const SubmitMilestoneSchema = z.object({
   deliverable_url: z.string().max(2000).optional(),
   deliverable_notes: z.string().max(5000).optional(),
+  isc_evidence: z.record(z.string(), z.string().max(2000)).optional(),
 });
 
 export const RejectMilestoneSchema = z.object({

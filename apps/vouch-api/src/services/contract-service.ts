@@ -15,6 +15,30 @@ import {
 } from '@percival/vouch-db';
 import { ulid } from 'ulid';
 
+// ── ISC Types ──
+
+export interface ISCCriterion {
+  id: string;           // "C1", "C2", etc.
+  criterion: string;    // 8-12 words, binary testable
+  verify: string;       // verification method
+  priority: 'critical' | 'important' | 'nice';
+  status: 'pending' | 'passed' | 'failed';
+  evidence?: string;    // proof when verified
+}
+
+export interface ISCAntiCriterion {
+  id: string;           // "A1", "A2", etc.
+  criterion: string;
+  verify: string;
+  status: 'avoided' | 'violated';
+  evidence?: string;
+}
+
+export interface MilestoneISC {
+  criteria: ISCCriterion[];
+  antiCriteria?: ISCAntiCriterion[];
+}
+
 // ── Types ──
 
 export interface CreateContractParams {
@@ -37,6 +61,7 @@ export interface CreateContractParams {
     description?: string;
     acceptance_criteria?: string;
     percentage_bps: number;
+    isc_criteria?: MilestoneISC;
   }>;
 }
 
@@ -75,6 +100,127 @@ async function logEvent(
     actorPubkey,
     metadata: metadata ?? {},
   });
+}
+
+// ── ISC Validation ──
+
+/**
+ * Validate ISC criteria structure.
+ * Each criterion must have id, criterion (4-20 words), verify, priority.
+ * IDs must be unique. Criterion text under 100 chars. At least one criterion required.
+ */
+export function validateISC(isc: MilestoneISC): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  if (!isc.criteria || isc.criteria.length === 0) {
+    errors.push('At least one criterion is required');
+    return { valid: false, errors };
+  }
+
+  const seenIds = new Set<string>();
+
+  for (const c of isc.criteria) {
+    if (!c.id) {
+      errors.push('Each criterion must have an id');
+    } else if (seenIds.has(c.id)) {
+      errors.push(`Duplicate criterion id: ${c.id}`);
+    } else {
+      seenIds.add(c.id);
+    }
+
+    if (!c.criterion) {
+      errors.push(`Criterion ${c.id || '?'}: criterion text is required`);
+    } else {
+      if (c.criterion.length > 100) {
+        errors.push(`Criterion ${c.id || '?'}: text must be under 100 characters`);
+      }
+      const wordCount = c.criterion.trim().split(/\s+/).length;
+      if (wordCount < 4 || wordCount > 20) {
+        errors.push(`Criterion ${c.id || '?'}: must be 4-20 words (got ${wordCount})`);
+      }
+    }
+
+    if (!c.verify) {
+      errors.push(`Criterion ${c.id || '?'}: verify method is required`);
+    }
+
+    if (!c.priority || !['critical', 'important', 'nice'].includes(c.priority)) {
+      errors.push(`Criterion ${c.id || '?'}: priority must be critical, important, or nice`);
+    }
+  }
+
+  if (isc.antiCriteria) {
+    for (const a of isc.antiCriteria) {
+      if (!a.id) {
+        errors.push('Each anti-criterion must have an id');
+      } else if (seenIds.has(a.id)) {
+        errors.push(`Duplicate criterion/anti-criterion id: ${a.id}`);
+      } else {
+        seenIds.add(a.id);
+      }
+
+      if (!a.criterion) {
+        errors.push(`Anti-criterion ${a.id || '?'}: criterion text is required`);
+      }
+
+      if (!a.verify) {
+        errors.push(`Anti-criterion ${a.id || '?'}: verify method is required`);
+      }
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Auto-generate ISC from plain text acceptance criteria.
+ * Runs automatically when acceptance_criteria is provided but isc_criteria is not.
+ * Splits on sentences/bullets and converts each into a binary-testable criterion.
+ */
+export function generateISCFromText(text: string): MilestoneISC {
+  // Split on newlines, bullets, semicolons, or sentence boundaries
+  const lines = text
+    .split(/[\n;]|(?:^|\n)\s*[-*•]\s*|(?<=\.)\s+/)
+    .map(s => s.trim())
+    .filter(s => s.length > 3);
+
+  const criteria: ISCCriterion[] = lines.map((line, i) => {
+    // Clean up the text to be concise
+    const cleaned = line
+      .replace(/^(must|should|shall|needs? to|has to)\s+/i, '')
+      .replace(/\.$/, '')
+      .trim();
+
+    // Truncate to ~12 words if too long
+    const words = cleaned.split(/\s+/);
+    const criterion = words.length > 12
+      ? words.slice(0, 12).join(' ')
+      : cleaned;
+
+    return {
+      id: `C${i + 1}`,
+      criterion,
+      verify: 'Customer confirms deliverable meets this requirement',
+      priority: 'important' as const,
+      status: 'pending' as const,
+    };
+  });
+
+  // Ensure at least one criterion
+  if (criteria.length === 0) {
+    criteria.push({
+      id: 'C1',
+      criterion: 'Deliverable matches acceptance criteria description',
+      verify: 'Customer reviews and confirms',
+      priority: 'critical',
+      status: 'pending',
+    });
+  }
+
+  // Mark first criterion as critical (primary deliverable)
+  criteria[0].priority = 'critical';
+
+  return { criteria };
 }
 
 // ── Contract Lifecycle ──
@@ -116,17 +262,36 @@ export async function createContract(params: CreateContractParams) {
     });
 
     // Create work milestones
-    const milestoneRows = params.milestones.map((m, i) => ({
-      id: ulid(),
-      contractId,
-      sequence: i + 1,
-      title: m.title,
-      description: m.description,
-      acceptanceCriteria: m.acceptance_criteria,
-      amountSats: Math.round((params.totalSats * m.percentage_bps) / 10000),
-      percentageBps: m.percentage_bps,
-      isRetention: false,
-    }));
+    // ISC is always generated: use provided ISC, or auto-generate from acceptance_criteria text
+    const milestoneRows = params.milestones.map((m, i) => {
+      let isc = m.isc_criteria || null;
+
+      // Auto-generate ISC from plain text if no structured ISC provided
+      if (!isc && m.acceptance_criteria) {
+        isc = generateISCFromText(m.acceptance_criteria);
+      }
+
+      // Validate ISC if present
+      if (isc) {
+        const validation = validateISC(isc);
+        if (!validation.valid) {
+          throw new Error(`Milestone "${m.title}" ISC validation failed: ${validation.errors.join('; ')}`);
+        }
+      }
+
+      return {
+        id: ulid(),
+        contractId,
+        sequence: i + 1,
+        title: m.title,
+        description: m.description,
+        acceptanceCriteria: m.acceptance_criteria,
+        amountSats: Math.round((params.totalSats * m.percentage_bps) / 10000),
+        percentageBps: m.percentage_bps,
+        isRetention: false,
+        iscCriteria: isc,
+      };
+    });
 
     // Create retention milestone (if retention > 0)
     if (retentionBps > 0) {
@@ -140,6 +305,7 @@ export async function createContract(params: CreateContractParams) {
         amountSats: Math.round((params.totalSats * retentionBps) / 10000),
         percentageBps: retentionBps,
         isRetention: true,
+        iscCriteria: null,
       });
     }
 
@@ -350,6 +516,7 @@ export async function submitMilestone(
   agentPubkey: string,
   deliverableUrl?: string,
   deliverableNotes?: string,
+  evidence?: Record<string, string>,
 ) {
   return await db.transaction(async (tx) => {
     const [contract] = await tx
@@ -380,6 +547,32 @@ export async function submitMilestone(
       throw new Error(`Cannot submit milestone in status "${milestone.status}"`);
     }
 
+    // Process ISC evidence if milestone has ISC criteria and evidence is provided
+    let updatedIsc = milestone.iscCriteria as MilestoneISC | null;
+    if (updatedIsc && evidence) {
+      // Update each criterion's evidence and status
+      updatedIsc = {
+        ...updatedIsc,
+        criteria: updatedIsc.criteria.map((c) => {
+          if (evidence[c.id]) {
+            return { ...c, status: 'passed' as const, evidence: evidence[c.id] };
+          }
+          return c;
+        }),
+      };
+
+      // Check all CRITICAL criteria have evidence
+      const missingCritical = updatedIsc.criteria
+        .filter((c) => c.priority === 'critical' && c.status !== 'passed')
+        .map((c) => c.id);
+
+      if (missingCritical.length > 0) {
+        throw new Error(
+          `Missing evidence for critical ISC criteria: ${missingCritical.join(', ')}`
+        );
+      }
+    }
+
     await tx
       .update(contractMilestones)
       .set({
@@ -387,6 +580,7 @@ export async function submitMilestone(
         deliverableUrl,
         deliverableNotes,
         submittedAt: new Date(),
+        ...(updatedIsc ? { iscCriteria: updatedIsc } : {}),
       })
       .where(eq(contractMilestones.id, milestoneId));
 
@@ -395,7 +589,11 @@ export async function submitMilestone(
       contractId,
       eventType: 'milestone_submitted',
       actorPubkey: agentPubkey,
-      metadata: { milestone_id: milestoneId, milestone_title: milestone.title },
+      metadata: {
+        milestone_id: milestoneId,
+        milestone_title: milestone.title,
+        ...(evidence ? { isc_evidence_keys: Object.keys(evidence) } : {}),
+      },
     });
   });
 }
@@ -408,6 +606,7 @@ export async function acceptMilestone(
   contractId: string,
   milestoneId: string,
   customerPubkey: string,
+  iscOverrides?: Record<string, { status: 'passed' | 'failed'; note?: string }>,
 ) {
   return await db.transaction(async (tx) => {
     const [contract] = await tx
@@ -435,11 +634,58 @@ export async function acceptMilestone(
       throw new Error(`Cannot accept milestone in status "${milestone.status}"`);
     }
 
+    // Process ISC criteria validation if milestone has ISC
+    let finalIsc = milestone.iscCriteria as MilestoneISC | null;
+    if (finalIsc) {
+      // Apply overrides
+      if (iscOverrides) {
+        finalIsc = {
+          ...finalIsc,
+          criteria: finalIsc.criteria.map((c) => {
+            const override = iscOverrides[c.id];
+            if (override) {
+              return {
+                ...c,
+                status: override.status,
+                evidence: override.note ? `${c.evidence || ''} [Override: ${override.note}]`.trim() : c.evidence,
+              };
+            }
+            return c;
+          }),
+        };
+      }
+
+      // Verify all CRITICAL criteria are 'passed'
+      const failedCritical = finalIsc.criteria
+        .filter((c) => c.priority === 'critical' && c.status !== 'passed')
+        .map((c) => c.id);
+
+      if (failedCritical.length > 0) {
+        throw new Error(
+          `Cannot accept milestone: critical ISC criteria not passed: ${failedCritical.join(', ')}`
+        );
+      }
+
+      // Check anti-criteria are all 'avoided'
+      if (finalIsc.antiCriteria) {
+        const violated = finalIsc.antiCriteria
+          .filter((a) => a.status === 'violated')
+          .map((a) => a.id);
+
+        if (violated.length > 0) {
+          throw new Error(
+            `Cannot accept milestone: anti-criteria violated: ${violated.join(', ')}`
+          );
+        }
+      }
+    }
+
     await tx
       .update(contractMilestones)
       .set({
         status: 'accepted',
         acceptedAt: new Date(),
+        ...(finalIsc ? { iscCriteria: finalIsc } : {}),
       })
       .where(eq(contractMilestones.id, milestoneId));
 
@@ -1097,4 +1343,92 @@ export async function getContractEvents(
       has_more: offset + rows.length < Number(total),
     },
   };
+}
+
+// ── ISC Operations ──
+
+/**
+ * Get ISC criteria for a specific milestone.
+ * Verifies the requester is a party to the contract.
+ */
+export async function getMilestoneISC(
+  contractId: string,
+  milestoneId: string,
+  requesterPubkey: string,
+): Promise<MilestoneISC | null> {
+  const [contract] = await db
+    .select()
+    .from(contracts)
+    .where(eq(contracts.id, contractId))
+    .limit(1);
+
+  if (!contract) throw new Error('Contract not found');
+  if (contract.customerPubkey !== requesterPubkey && contract.agentPubkey !== requesterPubkey) {
+    throw new Error('Only contract parties can view ISC criteria');
+  }
+
+  const [milestone] = await db
+    .select()
+    .from(contractMilestones)
+    .where(and(
+      eq(contractMilestones.id, milestoneId),
+      eq(contractMilestones.contractId, contractId),
+    ))
+    .limit(1);
+
+  if (!milestone) throw new Error('Milestone not found');
+
+  return (milestone.iscCriteria as MilestoneISC) || null;
+}
+
+/**
+ * Update ISC criteria for a milestone.
+ * Only allowed when contract is draft or active.
+ * Validates the ISC structure before saving.
+ */
+export async function updateMilestoneISC(
+  contractId: string,
+  milestoneId: string,
+  requesterPubkey: string,
+  isc: MilestoneISC,
+): Promise<void> {
+  return await db.transaction(async (tx) => {
+    const [contract] = await tx
+      .select()
+      .from(contracts)
+      .where(eq(contracts.id, contractId))
+      .limit(1);
+
+    if (!contract) throw new Error('Contract not found');
+    if (contract.customerPubkey !== requesterPubkey && contract.agentPubkey !== requesterPubkey) {
+      throw new Error('Only contract parties can update ISC criteria');
+    }
+
+    const editableStatuses = ['draft', 'active'];
+    if (!editableStatuses.includes(contract.status)) {
+      throw new Error(`Cannot update ISC on contract in status "${contract.status}"`);
+    }
+
+    const [milestone] = await tx
+      .select()
+      .from(contractMilestones)
+      .where(and(
+        eq(contractMilestones.id, milestoneId),
+        eq(contractMilestones.contractId, contractId),
+      ))
+      .limit(1);
+
+    if (!milestone) throw new Error('Milestone not found');
+
+    // Validate ISC structure
+    const validation = validateISC(isc);
+    if (!validation.valid) {
+      throw new Error(`ISC validation failed: ${validation.errors.join('; ')}`);
+    }
+
+    await tx
+      .update(contractMilestones)
+      .set({ iscCriteria: isc })
+      .where(eq(contractMilestones.id, milestoneId));
+  });
 }

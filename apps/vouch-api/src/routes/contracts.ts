@@ -33,6 +33,9 @@ import {
   releaseRetention,
   cancelContract,
   getContractEvents,
+  getMilestoneISC,
+  updateMilestoneISC,
+  type MilestoneISC,
 } from '../services/contract-service';
 
 const app = new Hono<NostrAuthEnv>();
@@ -202,6 +205,7 @@ app.post('/:id/milestones/:mid/submit', async (c) => {
       pubkey,
       v.data.deliverable_url,
       v.data.deliverable_notes,
+      v.data.isc_evidence,
     );
     return success(c, { submitted: true });
   } catch (err) {
@@ -210,6 +214,7 @@ app.post('/:id/milestones/:mid/submit', async (c) => {
     if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
     if (message.includes('Cannot submit')) return error(c, 409, 'INVALID_STATE', message);
     if (message.includes('retention')) return error(c, 400, 'VALIDATION_ERROR', message);
+    if (message.includes('Missing evidence for critical ISC')) return error(c, 400, 'ISC_EVIDENCE_MISSING', message);
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to submit milestone');
   }
 });
@@ -222,7 +227,9 @@ app.post('/:id/milestones/:mid/accept', async (c) => {
   try {
     const contractId = c.req.param('id');
     const milestoneId = c.req.param('mid');
-    const result = await acceptMilestone(contractId, milestoneId, pubkey);
+    const body = await c.req.json().catch(() => ({}));
+    const iscOverrides = (body as { isc_overrides?: Record<string, { status: 'passed' | 'failed'; note?: string }> }).isc_overrides;
+    const result = await acceptMilestone(contractId, milestoneId, pubkey, iscOverrides);
 
     // Trigger payment release (non-blocking, matching staking-service pattern)
     releaseMilestonePayment(contractId, milestoneId).catch((err) => {
@@ -235,6 +242,8 @@ app.post('/:id/milestones/:mid/accept', async (c) => {
     console.error('[contracts] POST milestones/accept error:', message);
     if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
     if (message.includes('Cannot accept')) return error(c, 409, 'INVALID_STATE', message);
+    if (message.includes('critical ISC criteria')) return error(c, 400, 'ISC_CRITERIA_NOT_MET', message);
+    if (message.includes('anti-criteria violated')) return error(c, 400, 'ISC_ANTI_CRITERIA_VIOLATED', message);
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to accept milestone');
   }
 });
@@ -374,6 +383,53 @@ app.post('/:id/release-retention', async (c) => {
     if (message.includes('already released')) return error(c, 409, 'ALREADY_RELEASED', message);
     if (message.includes('not yet releasable')) return error(c, 409, 'TOO_EARLY', message);
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to release retention');
+  }
+});
+
+// ── GET /:id/milestones/:mid/isc — Get ISC criteria ──
+app.get('/:id/milestones/:mid/isc', async (c) => {
+  const pubkey = getPubkey(c);
+  if (!pubkey) return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
+
+  try {
+    const contractId = c.req.param('id');
+    const milestoneId = c.req.param('mid');
+    const isc = await getMilestoneISC(contractId, milestoneId, pubkey);
+    return success(c, { isc });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[contracts] GET milestones/isc error:', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
+    if (message.includes('Only contract parties')) return error(c, 403, 'FORBIDDEN', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to get ISC criteria');
+  }
+});
+
+// ── PUT /:id/milestones/:mid/isc — Update ISC criteria ──
+app.put('/:id/milestones/:mid/isc', async (c) => {
+  const pubkey = getPubkey(c);
+  if (!pubkey) return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
+
+  try {
+    const contractId = c.req.param('id');
+    const milestoneId = c.req.param('mid');
+    const body = await c.req.json();
+    const isc = body as { criteria: unknown[]; antiCriteria?: unknown[] };
+
+    if (!isc.criteria || !Array.isArray(isc.criteria)) {
+      return error(c, 400, 'VALIDATION_ERROR', 'criteria array is required');
+    }
+
+    await updateMilestoneISC(contractId, milestoneId, pubkey, isc as MilestoneISC);
+    return success(c, { updated: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[contracts] PUT milestones/isc error:', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
+    if (message.includes('Only contract parties')) return error(c, 403, 'FORBIDDEN', message);
+    if (message.includes('Cannot update ISC')) return error(c, 409, 'INVALID_STATE', message);
+    if (message.includes('ISC validation failed')) return error(c, 400, 'VALIDATION_ERROR', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to update ISC criteria');
   }
 });
 
