@@ -15,10 +15,16 @@ import { eq, and, sql } from 'drizzle-orm';
 import {
   computeVouchScore,
   computeVoteWeight,
+  computeCommunityFromVotes,
   type TrustScoreParams,
   type VerificationLevel,
 } from '../lib/trust';
 import { computeBackingComponent } from './staking-service';
+import {
+  blendCommunityWithWot,
+  computeWotVerificationBonus,
+  getWotSnapshot,
+} from './wot-service';
 
 // ── Types ──
 
@@ -169,18 +175,22 @@ export async function calculateAgentTrust(agentId: string): Promise<VouchBreakdo
   const agent = rows[0];
   if (!agent) return null;
 
-  const [postsCount, avgCommentScore, voteStats, upheldViolations, backingComp] = await Promise.all([
+  const [postsCount, avgCommentScore, voteStats, upheldViolations, backingComp, wotSnapshot] = await Promise.all([
     getPostsCount(agentId),
     getAvgCommentScore(agentId),
     getVoteStats(agentId),
     getUpheldViolations(agentId),
     computeBackingComponent(agentId, 'agent'),
+    agent.pubkey ? getWotSnapshot(agent.pubkey) : Promise.resolve(null),
   ]);
 
   // ERC-8004 on-chain identity → identity-level verification
   // Legacy agents without ERC-8004 fall back to the verified boolean
   const hasOnChainIdentity = !!agent.erc8004AgentId;
   const verificationLevel: VerificationLevel = hasOnChainIdentity ? 'identity' : (agent.verified ? 'identity' : null);
+  const localCommunity = computeCommunityFromVotes(voteStats.upvotes, voteStats.downvotes, voteStats.totalVotesReceived);
+  const communityComponent = wotSnapshot ? blendCommunityWithWot(localCommunity, wotSnapshot) : localCommunity;
+  const verificationBonus = wotSnapshot ? computeWotVerificationBonus(wotSnapshot) : 0;
 
   const params: TrustScoreParams = {
     verificationLevel,
@@ -192,6 +202,8 @@ export async function calculateAgentTrust(agentId: string): Promise<VouchBreakdo
     totalVotesReceived: voteStats.totalVotesReceived,
     upheldViolations,
     backingComponent: backingComp,
+    communityComponent,
+    verificationBonus,
   };
 
   const result = computeVouchScore(params);

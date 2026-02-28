@@ -71,6 +71,20 @@ describe('verification dimension', () => {
     const result = computeVouchScore({ ...baseParams, verificationLevel: 'identity' });
     expect(result.dimensions.verification).toBe(1000);
   });
+
+  test('verification bonus applies when provided', () => {
+    const result = computeVouchScore({ ...baseParams, verificationBonus: 100 });
+    expect(result.dimensions.verification).toBeCloseTo(243, -1); // ~143 base + 100 bonus
+  });
+
+  test('verification bonus is capped at 1000 total', () => {
+    const result = computeVouchScore({
+      ...baseParams,
+      verificationLevel: 'identity',
+      verificationBonus: 200,
+    });
+    expect(result.dimensions.verification).toBe(1000);
+  });
 });
 
 // ── Tenure Dimension Tests ──
@@ -218,6 +232,17 @@ describe('community dimension', () => {
       totalVotesReceived: 500,
     });
     expect(result.dimensions.community).toBe(1000);
+  });
+
+  test('community component override takes precedence over vote-derived score', () => {
+    const result = computeVouchScore({
+      ...baseParams,
+      upvotes: 100,
+      downvotes: 0,
+      totalVotesReceived: 100,
+      communityComponent: 420,
+    });
+    expect(result.dimensions.community).toBe(420);
   });
 });
 

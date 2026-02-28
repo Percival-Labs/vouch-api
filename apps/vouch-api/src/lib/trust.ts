@@ -27,6 +27,10 @@ export interface TrustScoreParams {
   upheldViolations: number;
   /** Backing component (0-1000) — computed async from staking data */
   backingComponent?: number;
+  /** Optional precomputed community component (0-1000). When omitted, derived from vote stats. */
+  communityComponent?: number;
+  /** Optional verification bonus (0-300), used for external attestation overlays. */
+  verificationBonus?: number;
 }
 
 export interface VouchDimensionBreakdown {
@@ -78,6 +82,10 @@ function computeVerification(level: VerificationLevel): number {
   return Math.round((baseScore / 700) * 1000);
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
 function computeTenure(accountCreatedAt: Date): number {
   const now = Date.now();
   const daysSinceCreation = (now - accountCreatedAt.getTime()) / (1000 * 60 * 60 * 24);
@@ -99,7 +107,7 @@ function computePerformance(
   return Math.max(0, Math.min(1000, Math.round(postScore + qualityScore + 300 - chivalryPenalty)));
 }
 
-function computeCommunity(upvotes: number, downvotes: number, totalVotesReceived: number): number {
+export function computeCommunityFromVotes(upvotes: number, downvotes: number, totalVotesReceived: number): number {
   const totalVotes = upvotes + downvotes;
   const ratioScore = totalVotes > 0
     ? (upvotes / totalVotes) * 500
@@ -117,12 +125,21 @@ function computeCommunity(upvotes: number, downvotes: number, totalVotesReceived
  * and passed in via params.backingComponent.
  */
 export function computeVouchScore(params: TrustScoreParams): VouchScoreResult {
+  const verification = clamp(
+    computeVerification(params.verificationLevel) + (params.verificationBonus ?? 0),
+    0,
+    1000,
+  );
+  const community = params.communityComponent !== undefined
+    ? clamp(Math.round(params.communityComponent), 0, 1000)
+    : computeCommunityFromVotes(params.upvotes, params.downvotes, params.totalVotesReceived);
+
   const dimensions: VouchDimensionBreakdown = {
-    verification: computeVerification(params.verificationLevel),
+    verification,
     tenure: computeTenure(params.accountCreatedAt),
     performance: computePerformance(params.postsCount, params.avgCommentScore, params.upheldViolations),
     backing: params.backingComponent ?? 0,
-    community: computeCommunity(params.upvotes, params.downvotes, params.totalVotesReceived),
+    community,
   };
 
   const composite = Math.round(

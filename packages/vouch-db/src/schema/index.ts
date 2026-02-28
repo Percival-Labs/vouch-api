@@ -8,3 +8,4 @@ export * from './moderation';
 export * from './staking';
 export * from './outcomes';
 export * from './contracts';
+export * from './wot';

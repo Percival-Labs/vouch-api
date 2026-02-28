@@ -45,6 +45,12 @@ bun run dev
 | `NODE_ENV` | No | `production` or `development` |
 | `VOUCH_CORS_ORIGIN` | No | Allowed CORS origin (default: localhost:3600) |
 | `VOUCH_SERVICE_NSEC` | No | Nostr key for signing NIP-85 attestations |
+| `WOT_ENABLED` | No | Enable WoT trust augmentation (default: `true`) |
+| `WOT_BASE_URL` | No | WoT API base URL (default: `https://wot.klabo.world`) |
+| `WOT_CACHE_TTL_HOURS` | No | WoT cache TTL in hours (default: `24`) |
+| `WOT_TIMEOUT_MS` | No | WoT request timeout in ms (default: `3000`) |
+| `WOT_COMMUNITY_WEIGHT` | No | Weight for WoT in community blend `0..1` (default: `0.30`) |
+| `WOT_VERIFICATION_BONUS_MAX` | No | Max WoT verification bonus points (default: `120`) |
 
 ## API Endpoints
 
