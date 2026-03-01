@@ -163,4 +163,67 @@ app.get('/consumers/:pubkey/vouch-score', async (c) => {
   }
 });
 
+// ── GET /wallets/:address/vouch-score — Public, unauthenticated wallet lookup ──
+// Used by @percival-labs/vouch-x402 to resolve EVM wallet addresses to Vouch trust scores.
+// Agents registered via ERC-8004 have their owner_address stored; this endpoint bridges
+// x402 payment payloads (which contain EVM addresses) to Vouch identity.
+app.get('/wallets/:address/vouch-score', async (c) => {
+  const address = c.req.param('address');
+
+  // Validate Ethereum address format (0x + 40 hex characters)
+  if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    return error(c, 400, 'INVALID_ADDRESS', 'Invalid Ethereum address format: expected 0x + 40 hex characters');
+  }
+
+  try {
+    // Look up agent by EVM wallet address (case-insensitive)
+    const [agent] = await db.select({ id: agents.id, trustScore: agents.trustScore })
+      .from(agents)
+      .where(eq(agents.ownerAddress, address.toLowerCase()))
+      .limit(1);
+
+    if (!agent) {
+      return error(c, 404, 'NOT_FOUND', 'No agent registered with this wallet address');
+    }
+
+    const [breakdown, pool] = await Promise.all([
+      calculateAgentTrust(agent.id),
+      getPoolByAgent(agent.id),
+    ]);
+
+    if (!breakdown) {
+      return error(c, 404, 'NOT_FOUND', 'No agent registered with this wallet address');
+    }
+
+    const totalStakedSats = pool?.totalStakedSats ?? 0;
+    const backerCount = pool?.totalStakers ?? 0;
+
+    const badge = resolveBadge(totalStakedSats, backerCount);
+    const tier = resolveTier(breakdown.composite, breakdown.is_verified);
+
+    return c.json({
+      agentId: breakdown.subject_id,
+      vouchScore: breakdown.composite,
+      scoreBreakdown: {
+        verification: breakdown.dimensions.verification,
+        tenure: breakdown.dimensions.tenure,
+        performance: breakdown.dimensions.performance,
+        backing: breakdown.dimensions.backing,
+        community: breakdown.dimensions.community,
+      },
+      backing: {
+        totalStakedSats,
+        backerCount,
+        badge,
+      },
+      tier,
+      lastUpdated: breakdown.computed_at,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[api] GET /v1/public/wallets/${address}/vouch-score error:`, message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to compute vouch score');
+  }
+});
+
 export default app;
