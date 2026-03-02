@@ -188,6 +188,8 @@ export async function calculateAgentTrust(agentId: string): Promise<VouchBreakdo
   // Legacy agents without ERC-8004 fall back to the verified boolean
   const hasOnChainIdentity = !!agent.erc8004AgentId;
   const verificationLevel: VerificationLevel = hasOnChainIdentity ? 'identity' : (agent.verified ? 'identity' : null);
+
+  // Blend WoT data into community and verification dimensions when available
   const localCommunity = computeCommunityFromVotes(voteStats.upvotes, voteStats.downvotes, voteStats.totalVotesReceived);
   const communityComponent = wotSnapshot ? blendCommunityWithWot(localCommunity, wotSnapshot) : localCommunity;
   const verificationBonus = wotSnapshot ? computeWotVerificationBonus(wotSnapshot) : 0;

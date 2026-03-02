@@ -1,0 +1,35 @@
+# Smithery MCP Server Configuration
+# https://smithery.ai/docs/build/getting-started
+#
+# Vouch Trust Verification — MCP server for AI agent trust scoring.
+# Verify reputation, register identity, report outcomes, generate proofs.
+
+startCommand:
+  type: stdio
+
+configSchema:
+  type: object
+  required: []
+  properties:
+    nsec:
+      type: string
+      description: "Nostr private key (bech32 nsec format). Omit to auto-generate ephemeral identity."
+    relay:
+      type: string
+      description: "Vouch relay URL"
+      default: "wss://relay.vouch.xyz"
+    apiUrl:
+      type: string
+      description: "Vouch API base URL"
+      default: "https://percivalvouch-api-production.up.railway.app"
+
+commandFunction: |
+  (config) => ({
+    command: 'npx',
+    args: ['-y', '@percival-labs/vouch-sdk', 'serve'],
+    env: {
+      ...(config.nsec ? { VOUCH_NSEC: config.nsec } : {}),
+      ...(config.relay ? { VOUCH_RELAY: config.relay } : {}),
+      ...(config.apiUrl ? { VOUCH_API_URL: config.apiUrl } : {})
+    }
+  })

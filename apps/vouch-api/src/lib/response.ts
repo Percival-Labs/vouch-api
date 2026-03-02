@@ -19,7 +19,7 @@ export function paginated<T>(c: Context, data: T[], meta: PaginationMeta) {
 
 export function error(
   c: Context,
-  status: 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500,
+  status: 400 | 401 | 402 | 403 | 404 | 409 | 422 | 429 | 500,
   code: string,
   message: string,
   details?: Array<{ field: string; issue: string }>,

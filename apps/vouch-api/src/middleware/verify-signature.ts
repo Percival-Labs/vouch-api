@@ -60,6 +60,30 @@ export const verifySignature: MiddlewareHandler<AppEnv> = async (c, next) => {
     return;
   }
 
+  // Skip Ed25519 auth for contract routes (use NIP-98 Nostr auth)
+  if (c.req.path.startsWith('/v1/contracts')) {
+    await next();
+    return;
+  }
+
+  // Skip Ed25519 auth for credit routes (use NIP-98 Nostr auth)
+  if (c.req.path.startsWith('/v1/credits')) {
+    await next();
+    return;
+  }
+
+  // Skip Ed25519 auth for privacy routes (use NIP-98 or no auth)
+  if (c.req.path.startsWith('/v1/privacy')) {
+    await next();
+    return;
+  }
+
+  // Skip Ed25519 auth for inference routes (use gateway secret)
+  if (c.req.path.startsWith('/v1/inference')) {
+    await next();
+    return;
+  }
+
   // Explicit test-mode bypass — requires VOUCH_SKIP_AUTH=true
   if (SKIP_AUTH) {
     const agentId = c.req.header('X-Agent-Id');

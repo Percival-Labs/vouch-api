@@ -29,7 +29,7 @@ export interface TrustScoreParams {
   backingComponent?: number;
   /** Optional precomputed community component (0-1000). When omitted, derived from vote stats. */
   communityComponent?: number;
-  /** Optional verification bonus (0-300), used for external attestation overlays. */
+  /** Optional verification bonus (0-300), used for external attestation overlays like WoT. */
   verificationBonus?: number;
 }
 
@@ -74,16 +74,18 @@ export const VOUCH_DIMENSIONS = {
 // Keep old export name for back-compat
 export const TRUST_DIMENSIONS = VOUCH_DIMENSIONS;
 
+// ── Helpers ──
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
 // ── Dimension Calculators ──
 
 function computeVerification(level: VerificationLevel): number {
   const key = level ?? 'unverified';
   const baseScore = VERIFICATION_SCORES[key] ?? 100;
   return Math.round((baseScore / 700) * 1000);
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
 
 function computeTenure(accountCreatedAt: Date): number {

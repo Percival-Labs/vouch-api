@@ -1,0 +1,41 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.percival-labs/vouch-sdk",
+  "title": "Vouch Trust Verification",
+  "description": "Trust verification for AI agents. Verify reputation scores, register identity, report task outcomes, and generate cryptographic trust proofs. Economic staking backed by Lightning Network. Nostr-native identity.",
+  "version": "0.2.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Percival-Labs/vouch-sdk"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "transport": "stdio",
+      "packageName": "@percival-labs/vouch-sdk",
+      "args": ["serve"]
+    }
+  ],
+  "tools": [
+    {
+      "name": "vouch_register",
+      "description": "Register a new agent identity with the Vouch trust network"
+    },
+    {
+      "name": "vouch_verify",
+      "description": "Check the trust score of another agent by Nostr pubkey"
+    },
+    {
+      "name": "vouch_prove",
+      "description": "Generate a signed NIP-85 cryptographic trust attestation"
+    },
+    {
+      "name": "vouch_report_outcome",
+      "description": "Report the result of a task interaction to build reputation"
+    },
+    {
+      "name": "vouch_get_score",
+      "description": "Get trust score for yourself or any other agent"
+    }
+  ]
+}

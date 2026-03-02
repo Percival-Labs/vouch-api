@@ -26,10 +26,15 @@ import publicRoutes from './routes/public';
 import discoveryRoutes from './routes/discovery';
 import { spec as openapiSpec } from './openapi-spec';
 import contractRoutes from './routes/contracts';
+import creditRoutes from './routes/credits';
+import privacyRoutes from './routes/privacy';
+import inferenceRoutes from './routes/inference';
 import { initTreasury, reconcileTreasury, runTreasuryRebalance, checkYieldReinvestment } from './services/treasury-service';
 import { cleanupExpiredPendingStakes } from './services/staking-service';
 import { processRetentionReleases } from './services/contract-service';
 import { takePriceSnapshot } from './services/price-service';
+import { expireTokenBatches } from './services/credit-service';
+import { pruneSpentTokens } from './services/privacy-service';
 
 // Combined env supports both Ed25519 (AppEnv) and Nostr (NostrAuthEnv) auth flows
 type CombinedEnv = {
@@ -61,7 +66,7 @@ const ALLOWED_ORIGINS = (process.env.VOUCH_CORS_ORIGINS || 'http://localhost:360
 app.use('*', cors({
   origin: (origin) => ALLOWED_ORIGINS.includes(origin) ? origin : '',
   allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization', 'X-Agent-Id', 'X-Timestamp', 'X-Signature', 'X-Nonce', 'Cookie'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-Agent-Id', 'X-Timestamp', 'X-Signature', 'X-Nonce', 'Cookie', 'X-Gateway-Secret'],
   exposeHeaders: ['Set-Cookie', 'X-Vouch-API-Version', 'X-Vouch-Docs', 'X-Vouch-LLMs-Txt'],
   maxAge: 3600,
   credentials: true,
@@ -125,6 +130,8 @@ app.route('/v1/webhooks', webhookRoutes);
 app.use('/v1/sdk/*', verifyNostrAuth);
 app.use('/v1/outcomes/*', verifyNostrAuth);
 app.use('/v1/contracts/*', verifyNostrAuth);
+app.use('/v1/credits/*', verifyNostrAuth);
+app.use('/v1/privacy/tokens/issue', verifyNostrAuth);
 
 // ── Ed25519 signature verification middleware ──
 // Applied to all /v1/* routes. Auth paths, /v1/public/*, and /v1/sdk/* are exempted inside the middleware.
@@ -144,6 +151,9 @@ app.use('/v1/staking/pools/*/distribute', agentRateLimiter('financial'));
 app.use('/v1/trust/refresh/*', agentRateLimiter('trust_refresh'));
 app.use('/v1/contracts/*/fund', agentRateLimiter('financial'));
 app.use('/v1/contracts/*/milestones/*/accept', agentRateLimiter('financial'));
+app.use('/v1/credits/deposit', agentRateLimiter('financial'));
+app.use('/v1/credits/deposit/confirm', agentRateLimiter('financial'));
+app.use('/v1/credits/batches', agentRateLimiter('financial'));
 
 // ── Mount route groups ──
 app.route('/v1/auth', authRoutes);      // user cookie-based sessions (no Ed25519 required)
@@ -155,6 +165,9 @@ app.route('/v1/tables', tableRoutes);
 app.route('/v1/trust', trustRoutes);
 app.route('/v1/staking', stakingRoutes);
 app.route('/v1/contracts', contractRoutes);    // Contract work agreements (NIP-98 auth)
+app.route('/v1/credits', creditRoutes);        // Credit management (NIP-98 auth)
+app.route('/v1/privacy', privacyRoutes);       // Token issuance (NIP-98 auth for /issue, public for /public-key)
+app.route('/v1/inference', inferenceRoutes);    // Usage reporting (gateway secret) + pricing (public)
 app.route('/v1', postRoutes); // posts handles /tables/:slug/posts, /posts/:id, /comments/:id/vote
 
 // ── Nonce cleanup cron (every 5 minutes) ──
@@ -239,6 +252,36 @@ if (treasuryRebalanceInterval && typeof treasuryRebalanceInterval === 'object' &
   treasuryRebalanceInterval.unref();
 }
 
+// ── Token batch expiry (hourly) ──
+const tokenBatchExpiryInterval = setInterval(async () => {
+  try {
+    const expired = await expireTokenBatches();
+    if (expired > 0) {
+      console.log(`[vouch-api] Expired ${expired} token batches`);
+    }
+  } catch (e) {
+    console.error('[vouch-api] Token batch expiry error:', e);
+  }
+}, 60 * 60 * 1000);
+if (tokenBatchExpiryInterval && typeof tokenBatchExpiryInterval === 'object' && 'unref' in tokenBatchExpiryInterval) {
+  tokenBatchExpiryInterval.unref();
+}
+
+// ── Spent token pruning (daily, 7-day TTL) ──
+const spentTokenPruneInterval = setInterval(async () => {
+  try {
+    const pruned = await pruneSpentTokens(7);
+    if (pruned > 0) {
+      console.log(`[vouch-api] Pruned ${pruned} spent tokens`);
+    }
+  } catch (e) {
+    console.error('[vouch-api] Spent token pruning error:', e);
+  }
+}, 24 * 60 * 60 * 1000);
+if (spentTokenPruneInterval && typeof spentTokenPruneInterval === 'object' && 'unref' in spentTokenPruneInterval) {
+  spentTokenPruneInterval.unref();
+}
+
 // ── Start server ──
 const port = parseInt(process.env.PORT || '3601', 10);
 
@@ -247,6 +290,9 @@ console.log(`[vouch-api] Auth: ${process.env.VOUCH_SKIP_AUTH === 'true' ? 'BYPAS
 console.log(`[vouch-api] DATABASE_URL: ${process.env.DATABASE_URL ? 'configured' : 'NOT SET'}`);
 console.log(`[vouch-api] NWC_URL: ${process.env.NWC_URL ? 'configured' : 'NOT SET (treasury will be unavailable)'}`);
 console.log(`[vouch-api] ENCRYPTION_KEY: ${process.env.ENCRYPTION_KEY ? 'configured' : 'NOT SET (NWC storage will fail)'}`);
+console.log(`[vouch-api] GATEWAY_SECRET: ${process.env.GATEWAY_SECRET ? 'configured' : 'NOT SET (inference usage reporting disabled)'}`);
+console.log(`[vouch-api] BJJ_PRIVATE_KEY: ${process.env.BJJ_PRIVATE_KEY ? 'configured' : 'NOT SET (ZK attestations disabled)'}`);
+console.log(`[vouch-api] PRIVACY_ISSUER_KEY: ${process.env.PRIVACY_ISSUER_KEY ? 'configured' : 'NOT SET (using ephemeral keys)'}`);
 
 export default {
   port,

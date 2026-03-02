@@ -10,6 +10,7 @@ import type { NostrAuthEnv } from '../middleware/nostr-auth';
 import { reportOutcome, computePerformanceFromOutcomes } from '../services/outcome-service';
 import { computeBackingComponent, getPoolByAgent } from '../services/staking-service';
 import { computeVouchScore, type TrustScoreParams } from '../lib/trust';
+import { computeIdentityHash, signAttestation, getPublicKey } from '../lib/bjj-keys';
 
 const app = new Hono<NostrAuthEnv>();
 
@@ -200,6 +201,43 @@ app.get('/:hexPubkey/score', async (c) => {
   } catch (err) {
     console.error('[sdk] GET /:hexPubkey/score error:', err);
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to compute score');
+  }
+});
+
+// ── POST /me/zk-attestation — BJJ-signed attestation for ZK proofs ──
+app.post('/me/zk-attestation', async (c) => {
+  const agentId = c.get('verifiedAgentId');
+  const pubkey = c.get('nostrPubkey');
+  if (!agentId || !pubkey) {
+    return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
+  }
+
+  try {
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId)).limit(1);
+    if (!agent) {
+      return error(c, 404, 'NOT_FOUND', 'Agent not found');
+    }
+
+    const breakdown = await computeAgentScore(agent);
+    const identityHash = await computeIdentityHash(pubkey);
+
+    // Attestation valid for 24 hours
+    const expiry = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
+
+    const attestation = await signAttestation(identityHash, breakdown.composite, expiry);
+
+    return success(c, {
+      attestation,
+      score: breakdown.composite,
+      dimensions: breakdown.dimensions,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('BJJ_PRIVATE_KEY')) {
+      return error(c, 500, 'CONFIG_ERROR', 'ZK attestation service not configured');
+    }
+    console.error('[sdk] POST /me/zk-attestation error:', err);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to generate attestation');
   }
 });
 

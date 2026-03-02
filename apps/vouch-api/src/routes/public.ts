@@ -5,11 +5,13 @@
 // Rate limited by IP (60 req/min, "public" tier). No signature verification.
 
 import { Hono } from 'hono';
-import { db, agents } from '@percival/vouch-db';
-import { eq } from 'drizzle-orm';
-import { error } from '../lib/response';
+import { db, agents, acpAgentStats, acpJobs } from '@percival/vouch-db';
+import { eq, sql } from 'drizzle-orm';
+import { error, success } from '../lib/response';
 import { calculateAgentTrust } from '../services/trust-service';
 import { getPoolByAgent } from '../services/staking-service';
+import { verifySignature, getPublicKey } from '../lib/bjj-keys';
+import { getPricingTable } from '../services/metering-service';
 
 // ── Types ──
 
@@ -223,6 +225,169 @@ app.get('/wallets/:address/vouch-score', async (c) => {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[api] GET /v1/public/wallets/${address}/vouch-score error:`, message);
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to compute vouch score');
+  }
+});
+
+// ── GET /acp/agents/:address/score — ACP on-chain trust score for any wallet ──
+// No Vouch registration required. Scores computed from public Base L2 events.
+app.get('/acp/agents/:address/score', async (c) => {
+  const address = c.req.param('address');
+
+  if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    return error(c, 400, 'INVALID_ADDRESS', 'Invalid Ethereum address format: expected 0x + 40 hex characters');
+  }
+
+  try {
+    const [stats] = await db.select()
+      .from(acpAgentStats)
+      .where(eq(acpAgentStats.address, address.toLowerCase()))
+      .limit(1);
+
+    if (!stats) {
+      return error(c, 404, 'NOT_FOUND', 'No ACP activity found for this address');
+    }
+
+    return c.json({
+      address: stats.address,
+      acpTrustScore: stats.acpTrustScore,
+      stats: {
+        totalJobsClient: stats.totalJobsClient,
+        totalJobsProvider: stats.totalJobsProvider,
+        totalJobsEvaluator: stats.totalJobsEvaluator,
+        completedAsProvider: stats.completedAsProvider,
+        failedAsProvider: stats.failedAsProvider,
+        totalEarnedUsdc: stats.totalEarnedUsdc,
+        totalSpentUsdc: stats.totalSpentUsdc,
+        uniqueClients: stats.uniqueClients,
+        uniqueProviders: stats.uniqueProviders,
+      },
+      firstSeenAt: stats.firstSeenAt,
+      lastActiveAt: stats.lastActiveAt,
+      updatedAt: stats.updatedAt,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[api] GET /v1/public/acp/agents/${address}/score error:`, message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to fetch ACP score');
+  }
+});
+
+// ── GET /acp/stats — Aggregate ACP indexer statistics ──
+app.get('/acp/stats', async (c) => {
+  try {
+    const [agentCount] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(acpAgentStats);
+
+    const [jobCount] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(acpJobs);
+
+    const [completedCount] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(acpJobs)
+      .where(eq(acpJobs.phase, 'completed'));
+
+    const [volumeResult] = await db.select({
+      total: sql<string>`coalesce(sum(${acpAgentStats.totalEarnedUsdc}), 0)`,
+    }).from(acpAgentStats);
+
+    return c.json({
+      totalAgents: agentCount.count,
+      totalJobs: jobCount.count,
+      completedJobs: completedCount.count,
+      totalVolumeUsdc: volumeResult.total,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[api] GET /v1/public/acp/stats error:', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to fetch ACP stats');
+  }
+});
+
+// ── POST /verify-zk-proof — Third-party ZK proof verification (public) ──
+// Allows any service to verify a Vouch ZK attestation without needing the BJJ key.
+app.post('/verify-zk-proof', async (c) => {
+  try {
+    const body = await c.req.json<{
+      identity_hash: string;
+      score: number;
+      threshold: number;
+      expiry: number;
+      signature: {
+        R8x: string;
+        R8y: string;
+        S: string;
+      };
+    }>();
+
+    if (!body.identity_hash || typeof body.score !== 'number' ||
+        typeof body.threshold !== 'number' || typeof body.expiry !== 'number' ||
+        !body.signature?.R8x || !body.signature?.R8y || !body.signature?.S) {
+      return error(c, 400, 'VALIDATION_ERROR', 'identity_hash, score, threshold, expiry, and signature are required');
+    }
+
+    // Check expiry
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const isExpired = body.expiry < nowSecs;
+
+    // Check threshold
+    const meetsThreshold = body.score >= body.threshold;
+
+    // Verify BJJ signature
+    let signatureValid = false;
+    try {
+      signatureValid = await verifySignature(
+        body.identity_hash,
+        body.score,
+        body.expiry,
+        body.signature,
+      );
+    } catch {
+      signatureValid = false;
+    }
+
+    // Get our public key for the verifier to cross-reference
+    let issuerPubkey: { Ax: string; Ay: string } | null = null;
+    try {
+      issuerPubkey = await getPublicKey();
+    } catch {
+      // BJJ not configured — still return verification result
+    }
+
+    return success(c, {
+      valid: signatureValid && !isExpired && meetsThreshold,
+      checks: {
+        signature_valid: signatureValid,
+        not_expired: !isExpired,
+        meets_threshold: meetsThreshold,
+      },
+      expiry: body.expiry,
+      issuer_pubkey: issuerPubkey,
+    });
+  } catch (err) {
+    console.error('[public] POST /verify-zk-proof error:', err);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to verify ZK proof');
+  }
+});
+
+// ── GET /pricing — Public model pricing table (cached) ──
+// Used by gateway and Engram clients for cost estimation.
+app.get('/pricing', async (c) => {
+  try {
+    const pricing = await getPricingTable();
+
+    return success(c, {
+      models: pricing.map(p => ({
+        model_id: p.modelId,
+        provider: p.provider,
+        input_cost_per_million_usd: p.inputCostPerMillion,
+        output_cost_per_million_usd: p.outputCostPerMillion,
+        pl_input_price_per_million_usd: p.plInputPricePerMillion,
+        pl_output_price_per_million_usd: p.plOutputPricePerMillion,
+        margin_bps: p.marginBps,
+      })),
+    });
+  } catch (err) {
+    console.error('[public] GET /pricing error:', err);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to get pricing');
   }
 });
 
