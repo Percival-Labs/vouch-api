@@ -31,6 +31,13 @@ export interface TrustScoreParams {
   communityComponent?: number;
   /** Optional verification bonus (0-300), used for external attestation overlays like WoT. */
   verificationBonus?: number;
+  /**
+   * Creator-consumer multiplier (Phase 4 flywheel).
+   * Agents who both create AND consume skills get a 1.5x performance growth rate.
+   * Default 1.0 (no bonus). Set to 1.5 when agent has entries in both
+   * skills (creator) and skillPurchases (buyer) tables.
+   */
+  performanceMultiplier?: number;
 }
 
 export interface VouchDimensionBreakdown {
@@ -136,10 +143,14 @@ export function computeVouchScore(params: TrustScoreParams): VouchScoreResult {
     ? clamp(Math.round(params.communityComponent), 0, 1000)
     : computeCommunityFromVotes(params.upvotes, params.downvotes, params.totalVotesReceived);
 
+  const rawPerformance = computePerformance(params.postsCount, params.avgCommentScore, params.upheldViolations);
+  const multiplier = params.performanceMultiplier ?? 1.0;
+  const boostedPerformance = Math.min(1000, Math.round(rawPerformance * multiplier));
+
   const dimensions: VouchDimensionBreakdown = {
     verification,
     tenure: computeTenure(params.accountCreatedAt),
-    performance: computePerformance(params.postsCount, params.avgCommentScore, params.upheldViolations),
+    performance: boostedPerformance,
     backing: params.backingComponent ?? 0,
     community,
   };

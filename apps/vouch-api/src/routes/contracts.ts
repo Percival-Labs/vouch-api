@@ -15,6 +15,7 @@ import {
   CancelContractSchema,
   PaginationSchema,
   UpdateISCSchema,
+  SubmitBidSchema,
 } from '../lib/schemas';
 import type { NostrAuthEnv } from '../middleware/nostr-auth';
 import {
@@ -36,6 +37,11 @@ import {
   getContractEvents,
   getMilestoneISC,
   updateMilestoneISC,
+  submitBid,
+  listBids,
+  acceptBid,
+  rejectBid,
+  withdrawBid,
   type MilestoneISC,
 } from '../services/contract-service';
 
@@ -207,6 +213,7 @@ app.post('/:id/milestones/:mid/submit', async (c) => {
       v.data.deliverable_url,
       v.data.deliverable_notes,
       v.data.isc_evidence,
+      v.data.skills_used,
     );
     return success(c, { submitted: true });
   } catch (err) {
@@ -463,6 +470,113 @@ app.get('/:id/events', async (c) => {
   } catch (err) {
     console.error('[contracts] GET /:id/events error:', err);
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to get events');
+  }
+});
+
+// ── POST /:id/bids — Submit bid (agent) ──
+app.post('/:id/bids', async (c) => {
+  const pubkey = getPubkey(c);
+  if (!pubkey) return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
+
+  try {
+    const contractId = c.req.param('id');
+    const body = await c.req.json();
+    const v = validate(SubmitBidSchema, body);
+    if (!v.success) return error(c, 400, v.error.code, v.error.message, v.error.details);
+
+    const result = await submitBid(contractId, pubkey, v.data.approach, v.data.cost_sats, v.data.estimated_days);
+    return success(c, result, 201);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[contracts] POST /:id/bids error:', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
+    if (message.includes('not open')) return error(c, 409, 'INVALID_STATE', message);
+    if (message.includes('your own')) return error(c, 403, 'FORBIDDEN', message);
+    if (message.includes('already have')) return error(c, 409, 'DUPLICATE_BID', message);
+    if (message.includes('cost_sats') || message.includes('estimated_days') || message.includes('approach')) {
+      return error(c, 400, 'VALIDATION_ERROR', message);
+    }
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to submit bid');
+  }
+});
+
+// ── GET /:id/bids — List bids (customer sees all, bidder sees own) ──
+app.get('/:id/bids', async (c) => {
+  const pubkey = getPubkey(c);
+  if (!pubkey) return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
+
+  try {
+    const contractId = c.req.param('id');
+    const bids = await listBids(contractId, pubkey);
+    return success(c, bids);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[contracts] GET /:id/bids error:', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to list bids');
+  }
+});
+
+// ── POST /:id/bids/:bidId/accept — Accept bid (customer) ──
+app.post('/:id/bids/:bidId/accept', async (c) => {
+  const pubkey = getPubkey(c);
+  if (!pubkey) return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
+
+  try {
+    const contractId = c.req.param('id');
+    const bidId = c.req.param('bidId');
+    const result = await acceptBid(contractId, bidId, pubkey);
+    return success(c, result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[contracts] POST /:id/bids/:bidId/accept error:', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
+    if (message.includes('Only the customer')) return error(c, 403, 'FORBIDDEN', message);
+    if (message.includes('not open') || message.includes('not pending')) return error(c, 409, 'INVALID_STATE', message);
+    if (message.includes('does not belong')) return error(c, 400, 'VALIDATION_ERROR', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to accept bid');
+  }
+});
+
+// ── POST /:id/bids/:bidId/reject — Reject bid (customer) ──
+app.post('/:id/bids/:bidId/reject', async (c) => {
+  const pubkey = getPubkey(c);
+  if (!pubkey) return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
+
+  try {
+    const contractId = c.req.param('id');
+    const bidId = c.req.param('bidId');
+    const result = await rejectBid(contractId, bidId, pubkey);
+    return success(c, result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[contracts] POST /:id/bids/:bidId/reject error:', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
+    if (message.includes('Only the customer')) return error(c, 403, 'FORBIDDEN', message);
+    if (message.includes('not pending')) return error(c, 409, 'INVALID_STATE', message);
+    if (message.includes('does not belong')) return error(c, 400, 'VALIDATION_ERROR', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to reject bid');
+  }
+});
+
+// ── POST /:id/bids/:bidId/withdraw — Withdraw bid (bidder) ──
+app.post('/:id/bids/:bidId/withdraw', async (c) => {
+  const pubkey = getPubkey(c);
+  if (!pubkey) return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
+
+  try {
+    const contractId = c.req.param('id');
+    const bidId = c.req.param('bidId');
+    const result = await withdrawBid(contractId, bidId, pubkey);
+    return success(c, result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[contracts] POST /:id/bids/:bidId/withdraw error:', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
+    if (message.includes('Only the bidder')) return error(c, 403, 'FORBIDDEN', message);
+    if (message.includes('not pending')) return error(c, 409, 'INVALID_STATE', message);
+    if (message.includes('does not belong')) return error(c, 400, 'VALIDATION_ERROR', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to withdraw bid');
   }
 });
 

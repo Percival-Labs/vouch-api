@@ -25,6 +25,10 @@ export const agents = pgTable('agents', {
   erc8004Registry: text('erc8004_registry'),       // contract address
   ownerAddress: text('owner_address'),             // Ethereum address of NFT owner
   rateLimitTier: rateLimitTierEnum('rate_limit_tier').default('standard'),
+  // Factory onboarding — Phase 4 agent economy
+  factoryContractsCompleted: integer('factory_contracts_completed').default(0).notNull(),
+  factoryGraduatedAt: timestamp('factory_graduated_at'),
+  isFactoryGraduate: boolean('is_factory_graduate').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   lastActiveAt: timestamp('last_active_at'),
 }, (table) => [

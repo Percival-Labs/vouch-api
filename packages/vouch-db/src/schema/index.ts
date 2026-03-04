@@ -11,3 +11,4 @@ export * from './contracts';
 export * from './virtuals-acp';
 export * from './inference';
 export * from './wot';
+export * from './skills';

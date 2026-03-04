@@ -89,6 +89,7 @@ export const contractMilestones = pgTable('contract_milestones', {
   deliverableUrl: text('deliverable_url'),
   deliverableNotes: text('deliverable_notes'),
   iscCriteria: jsonb('isc_criteria'), // MilestoneISC structure
+  skillsUsed: jsonb('skills_used').default([]), // skill IDs used to complete this milestone
   paymentHash: text('payment_hash'),
   submittedAt: timestamp('submitted_at'),
   acceptedAt: timestamp('accepted_at'),

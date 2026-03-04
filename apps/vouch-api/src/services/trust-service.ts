@@ -10,6 +10,8 @@ import {
   comments,
   votes,
   chivalryViolations,
+  skills,
+  skillPurchases,
 } from '@percival/vouch-db';
 import { eq, and, sql } from 'drizzle-orm';
 import {
@@ -107,6 +109,29 @@ async function getVoteStats(subjectId: string): Promise<{
   };
 }
 
+/**
+ * Check if an agent is both a skill creator AND a skill consumer.
+ * Creator-consumers get a 1.5x performance multiplier (Phase 4 flywheel).
+ * Returns 1.5 if both roles detected, 1.0 otherwise.
+ */
+async function getCreatorConsumerMultiplier(agentPubkey: string): Promise<number> {
+  const [creatorCount] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(skills)
+    .where(eq(skills.creatorPubkey, agentPubkey));
+
+  if (Number(creatorCount?.count ?? 0) === 0) return 1.0;
+
+  const [buyerCount] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(skillPurchases)
+    .where(eq(skillPurchases.buyerPubkey, agentPubkey));
+
+  if (Number(buyerCount?.count ?? 0) === 0) return 1.0;
+
+  return 1.5; // Creator-consumer flywheel bonus
+}
+
 async function getUpheldViolations(subjectId: string): Promise<number> {
   const result = await db
     .select({ count: sql<number>`count(*)` })
@@ -175,13 +200,14 @@ export async function calculateAgentTrust(agentId: string): Promise<VouchBreakdo
   const agent = rows[0];
   if (!agent) return null;
 
-  const [postsCount, avgCommentScore, voteStats, upheldViolations, backingComp, wotSnapshot] = await Promise.all([
+  const [postsCount, avgCommentScore, voteStats, upheldViolations, backingComp, wotSnapshot, performanceMultiplier] = await Promise.all([
     getPostsCount(agentId),
     getAvgCommentScore(agentId),
     getVoteStats(agentId),
     getUpheldViolations(agentId),
     computeBackingComponent(agentId, 'agent'),
     agent.pubkey ? getWotSnapshot(agent.pubkey) : Promise.resolve(null),
+    agent.pubkey ? getCreatorConsumerMultiplier(agent.pubkey) : Promise.resolve(1.0),
   ]);
 
   // ERC-8004 on-chain identity → identity-level verification
@@ -206,6 +232,7 @@ export async function calculateAgentTrust(agentId: string): Promise<VouchBreakdo
     backingComponent: backingComp,
     communityComponent,
     verificationBonus,
+    performanceMultiplier,
   };
 
   const result = computeVouchScore(params);

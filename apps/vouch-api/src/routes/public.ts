@@ -5,8 +5,8 @@
 // Rate limited by IP (60 req/min, "public" tier). No signature verification.
 
 import { Hono } from 'hono';
-import { db, agents, acpAgentStats, acpJobs } from '@percival/vouch-db';
-import { eq, sql } from 'drizzle-orm';
+import { db, agents, acpAgentStats, acpJobs, skills, skillPurchases } from '@percival/vouch-db';
+import { eq, sql, and } from 'drizzle-orm';
 import { error, success } from '../lib/response';
 import { calculateAgentTrust } from '../services/trust-service';
 import { getPoolByAgent } from '../services/staking-service';
@@ -388,6 +388,423 @@ app.get('/pricing', async (c) => {
   } catch (err) {
     console.error('[public] GET /pricing error:', err);
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to get pricing');
+  }
+});
+
+// ── GET /skills — Browse skill marketplace (public) ──
+app.get('/skills', async (c) => {
+  try {
+    const tag = c.req.query('tag');
+    const search = c.req.query('search');
+    const sort = c.req.query('sort') || 'popular'; // popular | rating | newest | price
+    const page = parseInt(c.req.query('page') || '1', 10);
+    const limit = Math.min(parseInt(c.req.query('limit') || '25', 10), 100);
+    const offset = (page - 1) * limit;
+
+    // Build conditions
+    const conditions = [eq(skills.status, 'active')];
+    if (tag) {
+      conditions.push(sql`${skills.tags} @> ${JSON.stringify([tag])}::jsonb`);
+    }
+    if (search) {
+      // Escape LIKE metacharacters to prevent wildcard injection / DoS
+      const escaped = search.replace(/[%_\\]/g, '\\$&');
+      conditions.push(
+        sql`(${skills.name} ILIKE ${'%' + escaped + '%'} OR ${skills.description} ILIKE ${'%' + escaped + '%'})`,
+      );
+    }
+
+    const whereClause = conditions.length > 1 ? and(...conditions) : conditions[0];
+
+    // Sort
+    const orderBy = sort === 'rating' ? sql`${skills.avgRating} DESC NULLS LAST`
+      : sort === 'newest' ? sql`${skills.createdAt} DESC`
+      : sort === 'price' ? sql`${skills.priceSats} ASC`
+      : sql`${skills.purchaseCount} DESC`; // default: popular
+
+    const rows = await db.select({
+      id: skills.id,
+      name: skills.name,
+      slug: skills.slug,
+      description: skills.description,
+      version: skills.version,
+      priceSats: skills.priceSats,
+      royaltyRateBps: skills.royaltyRateBps,
+      creatorPubkey: skills.creatorPubkey,
+      purchaseCount: skills.purchaseCount,
+      avgRating: skills.avgRating,
+      ratingCount: skills.ratingCount,
+      tags: skills.tags,
+      sourceUrl: skills.sourceUrl,
+      createdAt: skills.createdAt,
+    })
+      .from(skills)
+      .where(whereClause)
+      .orderBy(orderBy)
+      .limit(limit)
+      .offset(offset);
+
+    const [countResult] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(skills)
+      .where(whereClause);
+
+    const total = countResult?.count ?? 0;
+
+    return c.json({
+      data: rows,
+      meta: { page, limit, total, has_more: offset + limit < total },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[public] GET /skills error:', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to list skills');
+  }
+});
+
+// ── GET /skills/:id — Skill detail (public) ──
+app.get('/skills/:id', async (c) => {
+  const skillId = c.req.param('id');
+
+  try {
+    const [skill] = await db.select().from(skills).where(eq(skills.id, skillId)).limit(1);
+
+    if (!skill || skill.status !== 'active') {
+      return error(c, 404, 'NOT_FOUND', 'Skill not found');
+    }
+
+    return success(c, skill);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[public] GET /skills/${skillId} error:`, message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to get skill');
+  }
+});
+
+// ── GET /contracts — Browse open contracts (public, no auth) ──
+app.get('/contracts', async (c) => {
+  try {
+    const status = c.req.query('status') || 'open';
+    const page = parseInt(c.req.query('page') || '1', 10);
+    const limit = Math.min(parseInt(c.req.query('limit') || '25', 10), 100);
+    const offset = (page - 1) * limit;
+
+    // Whitelist allowed public statuses — never expose disputed/cancelled
+    const ALLOWED_PUBLIC_STATUSES = ['open', 'active', 'completed'] as const;
+    if (!ALLOWED_PUBLIC_STATUSES.includes(status as typeof ALLOWED_PUBLIC_STATUSES[number])) {
+      return error(c, 400, 'VALIDATION_ERROR', `status must be one of: ${ALLOWED_PUBLIC_STATUSES.join(', ')}`);
+    }
+
+    // Import contracts schema lazily to avoid circular deps
+    const { contracts, contractMilestones } = await import('@percival/vouch-db');
+
+    // Map 'open' to contracts in draft/awaiting_funding (seeking bids)
+    const statusFilter = status === 'open'
+      ? sql`${contracts.status} IN ('draft', 'awaiting_funding')`
+      : eq(contracts.status, status);
+
+    const rows = await db.select({
+      id: contracts.id,
+      title: contracts.title,
+      description: contracts.description,
+      totalSats: contracts.totalSats,
+      status: contracts.status,
+      sow: contracts.sow,
+      createdAt: contracts.createdAt,
+    })
+      .from(contracts)
+      .where(statusFilter)
+      .orderBy(sql`${contracts.createdAt} DESC`)
+      .limit(limit)
+      .offset(offset);
+
+    const [countResult] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(contracts)
+      .where(statusFilter);
+
+    const total = countResult?.count ?? 0;
+
+    // Fetch milestones for listed contracts
+    const contractIds = rows.map((r) => r.id);
+    const milestones = contractIds.length > 0
+      ? await db.select({
+          contractId: contractMilestones.contractId,
+          id: contractMilestones.id,
+          title: contractMilestones.title,
+          percentageBps: contractMilestones.percentageBps,
+          status: contractMilestones.status,
+        })
+          .from(contractMilestones)
+          .where(sql`${contractMilestones.contractId} = ANY(${contractIds})`)
+      : [];
+
+    const data = rows.map((contract) => ({
+      ...contract,
+      milestones: milestones
+        .filter((m) => m.contractId === contract.id)
+        .map((m) => ({
+          id: m.id,
+          title: m.title,
+          amount_sats: Math.round((m.percentageBps / 10000) * contract.totalSats),
+          status: m.status,
+        })),
+    }));
+
+    return c.json({
+      data,
+      meta: { page, limit, total, has_more: offset + limit < total },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[public] GET /contracts error:', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to list contracts');
+  }
+});
+
+// ── GET /contracts/:id — Contract detail (public) ──
+app.get('/contracts/:id', async (c) => {
+  const contractId = c.req.param('id');
+
+  try {
+    const { contracts, contractMilestones } = await import('@percival/vouch-db');
+
+    const [contract] = await db.select({
+      id: contracts.id,
+      title: contracts.title,
+      description: contracts.description,
+      totalSats: contracts.totalSats,
+      status: contracts.status,
+      sow: contracts.sow,
+      createdAt: contracts.createdAt,
+    })
+      .from(contracts)
+      .where(eq(contracts.id, contractId))
+      .limit(1);
+
+    if (!contract) {
+      return error(c, 404, 'NOT_FOUND', 'Contract not found');
+    }
+
+    const milestones = await db.select({
+      id: contractMilestones.id,
+      title: contractMilestones.title,
+      description: contractMilestones.description,
+      percentageBps: contractMilestones.percentageBps,
+      status: contractMilestones.status,
+      acceptanceCriteria: contractMilestones.acceptanceCriteria,
+    })
+      .from(contractMilestones)
+      .where(eq(contractMilestones.contractId, contractId));
+
+    return success(c, {
+      ...contract,
+      milestones: milestones.map((m) => ({
+        ...m,
+        amount_sats: Math.round((m.percentageBps / 10000) * contract.totalSats),
+      })),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[public] GET /contracts/${contractId} error:`, message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to get contract');
+  }
+});
+
+// ── GET /factory/graduates — List factory graduates (public, paginated) ──
+app.get('/factory/graduates', async (c) => {
+  try {
+    const page = Math.max(1, parseInt(c.req.query('page') || '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '25', 10)));
+
+    const { listFactoryGraduates } = await import('../services/factory-service');
+    const result = await listFactoryGraduates(page, limit);
+
+    return c.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[public] GET /factory/graduates error:', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to list factory graduates');
+  }
+});
+
+// ── GET /factory/progress/:pubkey — Agent factory progress (public) ──
+app.get('/factory/progress/:pubkey', async (c) => {
+  const pubkey = c.req.param('pubkey');
+
+  if (!pubkey || !/^[0-9a-fA-F]{64}$/.test(pubkey)) {
+    return error(c, 400, 'INVALID_PUBKEY', 'Invalid pubkey format: expected 64 hex characters');
+  }
+
+  try {
+    const { getFactoryProgress } = await import('../services/factory-service');
+    const progress = await getFactoryProgress(pubkey);
+
+    if (!progress) {
+      return error(c, 404, 'NOT_FOUND', 'Agent not found');
+    }
+
+    return success(c, {
+      pubkey,
+      contractsCompleted: progress.contractsCompleted,
+      isGraduate: progress.isGraduate,
+      graduatedAt: progress.graduatedAt,
+      graduationThreshold: 5,
+      trustBoostOnGraduation: 25,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[public] GET /factory/progress/${pubkey} error:`, message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to get factory progress');
+  }
+});
+
+// ── GET /stats/flywheel — Capability ROI and compound flywheel metrics (public) ──
+// Returns aggregate stats for the capability flywheel: skills listed, purchases,
+// royalties, contracts, velocity, factory graduates, and active stakers.
+// No auth required. Cached for 60s to prevent DoS via repeated full-table aggregation.
+
+let flywheelCache: { data: unknown; expiresAt: number } | null = null;
+const FLYWHEEL_CACHE_TTL_MS = 60_000; // 60 seconds
+
+app.get('/stats/flywheel', async (c) => {
+  try {
+    // Return cached response if fresh (P1 fix — prevent DoS via repeated aggregate queries)
+    if (flywheelCache && Date.now() < flywheelCache.expiresAt) {
+      c.header('Cache-Control', 'public, max-age=60');
+      return c.json(flywheelCache.data);
+    }
+    // Lazily import tables that live outside the top-level import to avoid circular deps
+    const { contracts, royaltyPayments, stakes } = await import('@percival/vouch-db');
+
+    // ── Skills & Purchases (already top-level imported) ──
+
+    const [skillCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(skills)
+      .where(eq(skills.status, 'active'));
+
+    const [purchaseStats] = await db
+      .select({
+        totalPurchases: sql<number>`count(*)::int`,
+        totalRevenueSats: sql<string>`coalesce(sum(${skillPurchases.revenueFromSkillSats}), 0)`,
+        totalSpentSats: sql<string>`coalesce(sum(${skillPurchases.pricePaidSats}), 0)`,
+        purchasesWithRevenue: sql<number>`count(*) filter (where ${skillPurchases.revenueFromSkillSats} > 0)::int`,
+      })
+      .from(skillPurchases);
+
+    const totalRevenueSats = Number(purchaseStats?.totalRevenueSats ?? 0);
+    const totalSpentSats = Number(purchaseStats?.totalSpentSats ?? 0);
+
+    // Average capability ROI across purchases that have yielded revenue
+    // revenue_from_skill_sats / price_paid_sats per purchase, averaged
+    const [avgROIResult] = await db
+      .select({
+        avgROI: sql<string>`coalesce(
+          avg(${skillPurchases.revenueFromSkillSats}::float8 / nullif(${skillPurchases.pricePaidSats}, 0)),
+          0
+        )`,
+      })
+      .from(skillPurchases)
+      .where(sql`${skillPurchases.revenueFromSkillSats} > 0`);
+
+    const avgCapabilityROI = Math.round(Number(avgROIResult?.avgROI ?? 0) * 100) / 100;
+
+    // ── Royalties ──
+
+    const [royaltyStats] = await db
+      .select({
+        totalPaid: sql<number>`count(*) filter (where ${royaltyPayments.status} = 'paid')::int`,
+        totalSats: sql<string>`coalesce(sum(${royaltyPayments.royaltySats}) filter (where ${royaltyPayments.status} = 'paid'), 0)`,
+      })
+      .from(royaltyPayments);
+
+    // ── Contracts ──
+
+    const [contractStats] = await db
+      .select({
+        completedCount: sql<number>`count(*) filter (where ${contracts.status} = 'completed')::int`,
+        completedValueSats: sql<string>`coalesce(sum(${contracts.totalSats}) filter (where ${contracts.status} = 'completed'), 0)`,
+      })
+      .from(contracts);
+
+    // ── Flywheel Velocity ──
+    // Average days between a skill purchase and its first paid royalty event.
+    // Uses a raw CTE query — Drizzle subquery-join syntax doesn't compose cleanly here.
+    const velocityRows = await db.execute(sql`
+      with first_royalty as (
+        select purchase_id, min(created_at) as first_royalty_at
+        from royalty_payments
+        where status = 'paid'
+        group by purchase_id
+      )
+      select coalesce(
+        avg(extract(epoch from (fr.first_royalty_at - sp.created_at)) / 86400.0),
+        null
+      ) as avg_days
+      from skill_purchases sp
+      inner join first_royalty fr on fr.purchase_id = sp.id
+    `);
+
+    const velocityRowArray = (velocityRows as any)?.rows ?? velocityRows;
+    const avgVelocityRaw = Array.isArray(velocityRowArray) ? (velocityRowArray[0]?.avg_days as string | null) : null;
+    const avgVelocityDays = avgVelocityRaw != null
+      ? Math.round(Number(avgVelocityRaw) * 10) / 10
+      : null;
+
+    // ── Factory Graduates ──
+
+    const [graduateCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(agents)
+      .where(eq(agents.isFactoryGraduate, true));
+
+    // ── Active Stakers ──
+
+    const [activeStakerCount] = await db
+      .select({
+        count: sql<number>`count(DISTINCT ${stakes.stakerId})::int`,
+      })
+      .from(stakes)
+      .where(eq(stakes.status, 'active'));
+
+    const response = {
+      data: {
+        skills: {
+          totalListed: skillCount?.count ?? 0,
+        },
+        purchases: {
+          total: purchaseStats?.totalPurchases ?? 0,
+          totalSpentSats,
+          totalRevenueFromSkillsSats: totalRevenueSats,
+          avgCapabilityROI,
+        },
+        royalties: {
+          totalPaid: royaltyStats?.totalPaid ?? 0,
+          totalPaidSats: Number(royaltyStats?.totalSats ?? 0),
+        },
+        contracts: {
+          totalCompleted: contractStats?.completedCount ?? 0,
+          totalCompletedValueSats: Number(contractStats?.completedValueSats ?? 0),
+        },
+        flywheel: {
+          avgVelocityDays,
+          factoryGraduates: graduateCount?.count ?? 0,
+          activeStakers: activeStakerCount?.count ?? 0,
+          selfSustaining: avgCapabilityROI >= 3.0,
+        },
+      },
+      computedAt: new Date().toISOString(),
+    };
+
+    // Cache for 60s
+    flywheelCache = { data: response, expiresAt: Date.now() + FLYWHEEL_CACHE_TTL_MS };
+    c.header('Cache-Control', 'public, max-age=60');
+    return c.json(response);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[public] GET /stats/flywheel error:', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to compute flywheel stats');
   }
 });
 

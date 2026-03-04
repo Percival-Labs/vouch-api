@@ -26,6 +26,7 @@ import publicRoutes from './routes/public';
 import discoveryRoutes from './routes/discovery';
 import { spec as openapiSpec } from './openapi-spec';
 import contractRoutes from './routes/contracts';
+import skillRoutes from './routes/skills';
 import creditRoutes from './routes/credits';
 import privacyRoutes from './routes/privacy';
 import inferenceRoutes from './routes/inference';
@@ -35,6 +36,7 @@ import { processRetentionReleases } from './services/contract-service';
 import { takePriceSnapshot } from './services/price-service';
 import { expireTokenBatches } from './services/credit-service';
 import { pruneSpentTokens } from './services/privacy-service';
+import { distributeFeePool } from './services/fee-distribution-service';
 
 // Combined env supports both Ed25519 (AppEnv) and Nostr (NostrAuthEnv) auth flows
 type CombinedEnv = {
@@ -130,6 +132,7 @@ app.route('/v1/webhooks', webhookRoutes);
 app.use('/v1/sdk/*', verifyNostrAuth);
 app.use('/v1/outcomes/*', verifyNostrAuth);
 app.use('/v1/contracts/*', verifyNostrAuth);
+app.use('/v1/skills/*', verifyNostrAuth);
 app.use('/v1/credits/*', verifyNostrAuth);
 app.use('/v1/privacy/tokens/issue', verifyNostrAuth);
 
@@ -154,6 +157,9 @@ app.use('/v1/contracts/*/milestones/*/accept', agentRateLimiter('financial'));
 app.use('/v1/credits/deposit', agentRateLimiter('financial'));
 app.use('/v1/credits/deposit/confirm', agentRateLimiter('financial'));
 app.use('/v1/credits/batches', agentRateLimiter('financial'));
+app.use('/v1/skills/*/purchase', agentRateLimiter('financial'));
+app.use('/v1/contracts/*/bids', agentRateLimiter('financial'));
+app.use('/v1/contracts/*/bids/*/accept', agentRateLimiter('financial'));
 
 // ── Mount route groups ──
 app.route('/v1/auth', authRoutes);      // user cookie-based sessions (no Ed25519 required)
@@ -165,6 +171,7 @@ app.route('/v1/tables', tableRoutes);
 app.route('/v1/trust', trustRoutes);
 app.route('/v1/staking', stakingRoutes);
 app.route('/v1/contracts', contractRoutes);    // Contract work agreements (NIP-98 auth)
+app.route('/v1/skills', skillRoutes);          // Skill marketplace (NIP-98 auth)
 app.route('/v1/credits', creditRoutes);        // Credit management (NIP-98 auth)
 app.route('/v1/privacy', privacyRoutes);       // Token issuance (NIP-98 auth for /issue, public for /public-key)
 app.route('/v1/inference', inferenceRoutes);    // Usage reporting (gateway secret) + pricing (public)
@@ -280,6 +287,21 @@ const spentTokenPruneInterval = setInterval(async () => {
 }, 24 * 60 * 60 * 1000);
 if (spentTokenPruneInterval && typeof spentTokenPruneInterval === 'object' && 'unref' in spentTokenPruneInterval) {
   spentTokenPruneInterval.unref();
+}
+
+// ── Monthly fee pool distribution (every 30 days) ──
+const feeDistributionInterval = setInterval(async () => {
+  try {
+    const result = await distributeFeePool();
+    if (result) {
+      console.log(`[vouch-api] Fee distribution complete: ${result.totalFeePoolSats} sats distributed to ${result.stakerCount} stakers`);
+    }
+  } catch (e) {
+    console.error('[vouch-api] Fee distribution error:', e);
+  }
+}, 30 * 24 * 60 * 60 * 1000);
+if (feeDistributionInterval && typeof feeDistributionInterval === 'object' && 'unref' in feeDistributionInterval) {
+  feeDistributionInterval.unref();
 }
 
 // ── Start server ──

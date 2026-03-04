@@ -264,12 +264,25 @@ export const UpdateContractSchema = z.object({
 });
 
 export const SubmitMilestoneSchema = z.object({
-  deliverable_url: z.string().max(2000).optional(),
+  deliverable_url: z.string().max(2000).refine(
+    (s) => !s || /^https?:\/\//.test(s),
+    "URL must use http or https protocol"
+  ).optional(),
   deliverable_notes: z.string().max(5000).optional(),
   isc_evidence: z.record(
     z.string().regex(/^[CA]\d{1,3}$/, "Evidence key must be a valid criterion ID (e.g., C1, A2)"),
     z.string().max(2000, "Evidence text must be at most 2000 characters"),
   ).optional(),
+  skills_used: z
+    .array(z.string().min(1, "Skill ID must not be empty").max(100, "Skill ID too long"))
+    .max(20, "Maximum 20 skills per milestone")
+    .optional(),
+});
+
+export const SubmitBidSchema = z.object({
+  approach: z.string().min(1, "Approach is required").max(5000, "Approach must be under 5000 characters"),
+  cost_sats: z.number().int("Cost must be an integer").min(1, "Cost must be at least 1 sat").max(100_000_000, "Cost must be at most 100,000,000 sats"),
+  estimated_days: z.number().int("Days must be an integer").min(1, "Must be at least 1 day").max(365, "Must be at most 365 days"),
 });
 
 const ISCCriterionSchema = z.object({
