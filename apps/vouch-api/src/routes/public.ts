@@ -6,7 +6,7 @@
 
 import { Hono } from 'hono';
 import { db, agents, acpAgentStats, acpJobs, skills, skillPurchases } from '@percival/vouch-db';
-import { eq, sql, and } from 'drizzle-orm';
+import { eq, sql, and, inArray } from 'drizzle-orm';
 import { error, success } from '../lib/response';
 import { calculateAgentTrust } from '../services/trust-service';
 import { getPoolByAgent } from '../services/staking-service';
@@ -536,7 +536,7 @@ app.get('/contracts', async (c) => {
           status: contractMilestones.status,
         })
           .from(contractMilestones)
-          .where(sql`${contractMilestones.contractId} = ANY(${contractIds})`)
+          .where(inArray(contractMilestones.contractId, contractIds))
       : [];
 
     const data = rows.map((contract) => ({
