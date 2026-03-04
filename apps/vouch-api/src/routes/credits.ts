@@ -5,6 +5,7 @@ import { Hono } from 'hono';
 import { db, usageRecords } from '@percival/vouch-db';
 import { eq, desc, and, gte } from 'drizzle-orm';
 import { success, paginated, error } from '../lib/response';
+import { validate, CreditDepositSchema, CreditBatchSchema } from '../lib/schemas';
 import type { NostrAuthEnv } from '../middleware/nostr-auth';
 import {
   getBalance,
@@ -51,12 +52,13 @@ app.post('/deposit', async (c) => {
   if (!npub) return error(c, 401, 'AUTH_REQUIRED', 'NIP-98 authorization required');
 
   try {
-    const body = await c.req.json<{ amount_sats: number }>();
-    if (!body.amount_sats || typeof body.amount_sats !== 'number') {
-      return error(c, 400, 'VALIDATION_ERROR', 'amount_sats is required (number)');
+    const raw = await c.req.json();
+    const parsed = validate(CreditDepositSchema, raw);
+    if (!parsed.success) {
+      return error(c, 400, parsed.error.code, parsed.error.message, parsed.error.details);
     }
 
-    const result = await createDeposit(npub, body.amount_sats);
+    const result = await createDeposit(npub, parsed.data.amount_sats);
 
     return success(c, {
       deposit_id: result.depositId,
@@ -144,12 +146,13 @@ app.post('/batches', async (c) => {
   if (!npub) return error(c, 401, 'AUTH_REQUIRED', 'NIP-98 authorization required');
 
   try {
-    const body = await c.req.json<{ budget_sats: number; token_count: number }>();
-    if (!body.budget_sats || !body.token_count) {
-      return error(c, 400, 'VALIDATION_ERROR', 'budget_sats and token_count are required');
+    const raw = await c.req.json();
+    const parsed = validate(CreditBatchSchema, raw);
+    if (!parsed.success) {
+      return error(c, 400, parsed.error.code, parsed.error.message, parsed.error.details);
     }
 
-    const batch = await purchaseBatch(npub, body.budget_sats, body.token_count);
+    const batch = await purchaseBatch(npub, parsed.data.budget_sats, parsed.data.token_count);
 
     return success(c, {
       batch_hash: batch.batchHash,

@@ -2,12 +2,14 @@
 // Mounted BEFORE auth middleware (webhooks use secret verification, not Ed25519/NIP-98).
 
 import { Hono } from 'hono';
+import { timingSafeEqual } from 'node:crypto';
 
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
 
 /**
  * Verify that a webhook request is from Alby Hub.
  * Uses a dedicated webhook secret (separate from NWC credentials).
+ * H7 fix: Uses timingSafeEqual to prevent length and timing side-channels.
  */
 function verifyAlbyWebhook(authHeader: string | undefined): boolean {
   if (!WEBHOOK_SECRET) {
@@ -20,13 +22,13 @@ function verifyAlbyWebhook(authHeader: string | undefined): boolean {
     ? authHeader.slice(7)
     : authHeader;
 
-  // Constant-time comparison
-  if (token.length !== WEBHOOK_SECRET.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < token.length; i++) {
-    mismatch |= token.charCodeAt(i) ^ WEBHOOK_SECRET.charCodeAt(i);
+  // H7 fix: Use timingSafeEqual with length pre-check (matching inference.ts pattern)
+  const tokenBuf = Buffer.from(token);
+  const secretBuf = Buffer.from(WEBHOOK_SECRET);
+  if (tokenBuf.length !== secretBuf.length || !timingSafeEqual(tokenBuf, secretBuf)) {
+    return false;
   }
-  return mismatch === 0;
+  return true;
 }
 
 const app = new Hono();

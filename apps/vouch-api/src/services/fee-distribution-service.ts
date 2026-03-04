@@ -153,9 +153,12 @@ export async function distributeFeePool(): Promise<FeeDistributionResult | null>
     }
 
     // Compute split amounts using Math.floor (never overspend)
-    const treasuryRetainedSats = Math.floor((totalSats * TREASURY_SHARE_BPS) / 10000);
+    // M7 fix: Assign remainder to treasury so no sats are silently lost
+    let treasuryRetainedSats = Math.floor((totalSats * TREASURY_SHARE_BPS) / 10000);
     const stakerDistributedSats = Math.floor((totalSats * STAKER_SHARE_BPS) / 10000);
     const ecosystemFundSats = Math.floor((totalSats * ECOSYSTEM_SHARE_BPS) / 10000);
+    const remainder = totalSats - treasuryRetainedSats - stakerDistributedSats - ecosystemFundSats;
+    treasuryRetainedSats += remainder;
 
     console.log(`[fee-distribution] Fee pool: ${totalSats} sats | treasury: ${treasuryRetainedSats} | stakers: ${stakerDistributedSats} | ecosystem: ${ecosystemFundSats}`);
     // Get all active stakes across all pools for proportional distribution

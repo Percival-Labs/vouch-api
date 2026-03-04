@@ -4,6 +4,7 @@
 
 import { Hono } from 'hono';
 import { success, error } from '../lib/response';
+import { validate, CreateSkillSchema } from '../lib/schemas';
 import type { NostrAuthEnv } from '../middleware/nostr-auth';
 import {
   createSkill,
@@ -23,25 +24,18 @@ function getPubkey(c: { get: (key: string) => string | undefined }) {
 }
 
 // ── POST / — Create skill listing ──
+// M1 fix: Added Zod schema validation (was raw JSON type assertion)
 app.post('/', async (c) => {
   const pubkey = getPubkey(c);
   if (!pubkey) return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
 
   try {
-    const body = await c.req.json<{
-      name: string;
-      slug: string;
-      description: string;
-      price_sats: number;
-      royalty_rate_bps?: number;
-      tags?: string[];
-      content_hash?: string;
-      source_url?: string;
-    }>();
-
-    if (!body.name || !body.slug || !body.description || !body.price_sats) {
-      return error(c, 400, 'VALIDATION_ERROR', 'name, slug, description, and price_sats are required');
+    const raw = await c.req.json();
+    const parsed = validate(CreateSkillSchema, raw);
+    if (!parsed.success) {
+      return error(c, 400, parsed.error.code, parsed.error.message, parsed.error.details);
     }
+    const body = parsed.data;
 
     const result = await createSkill({
       creatorPubkey: pubkey,

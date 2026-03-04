@@ -90,8 +90,11 @@ app.post('/pools', async (c) => {
     }
     const body = parsed.data;
 
-    // C2 fix: agents can only create pools for themselves
-    if (callerId && callerId !== body.agent_id) {
+    // C2 fix + H6 fix: agents can only create pools for themselves. Require auth.
+    if (!callerId) {
+      return error(c, 401, 'UNAUTHORIZED', 'Authentication required');
+    }
+    if (callerId !== body.agent_id) {
       return error(c, 403, 'FORBIDDEN', 'Agents can only create pools for themselves');
     }
 
@@ -332,7 +335,11 @@ app.post('/fees', async (c) => {
     }
     const body = parsed.data;
 
-    if (callerId && callerId !== body.agent_id) {
+    // H6 fix: require auth for fee recording
+    if (!callerId) {
+      return error(c, 401, 'UNAUTHORIZED', 'Authentication required');
+    }
+    if (callerId !== body.agent_id) {
       return error(c, 403, 'FORBIDDEN', 'Agents can only record fees for themselves');
     }
 
@@ -410,8 +417,15 @@ app.get('/vouch-score/:id', async (c) => {
 
 // ── Treasury Summary ──
 
-/** GET /treasury/summary — Treasury balance in sats + USD, with price history */
+/** GET /treasury/summary — Treasury balance in sats + USD, with price history.
+ *  H5 fix: Restricted to PL admin (TREASURY_ADMIN_PUBKEY) — no longer exposed to all authenticated agents. */
 app.get('/treasury/summary', async (c) => {
+  const callerId = c.get('verifiedAgentId');
+  const adminPubkey = process.env.TREASURY_ADMIN_PUBKEY;
+  if (!adminPubkey || callerId !== adminPubkey) {
+    return error(c, 403, 'FORBIDDEN', 'Treasury summary requires admin access');
+  }
+
   try {
     const [treasuryRow] = await db
       .select({ totalSats: sql<number>`COALESCE(SUM(${treasury.amountSats}), 0)::int` })

@@ -161,6 +161,18 @@ function validateNip98Event(
     return `Invalid URL in "u" tag or request: ${urlTag[1]}`;
   }
 
+  // H4 fix: Validate full origin (not just pathname) to prevent cross-domain NIP-98 events.
+  // Railway proxies can cause origin mismatch, so we compare pathname + optional base URL validation.
+  const apiBaseUrl = process.env.VOUCH_API_BASE_URL;
+  if (apiBaseUrl) {
+    try {
+      const baseUrl = new URL(apiBaseUrl);
+      if (eventUrl.origin !== baseUrl.origin && eventUrl.origin !== reqUrl.origin) {
+        return `URL origin mismatch: event origin "${eventUrl.origin}" does not match API base "${baseUrl.origin}" or request "${reqUrl.origin}"`;
+      }
+    } catch { /* invalid VOUCH_API_BASE_URL — fall through to pathname check */ }
+  }
+
   if (eventUrl.pathname !== reqUrl.pathname) {
     return `URL mismatch: event path "${eventUrl.pathname}", request path "${reqUrl.pathname}"`;
   }

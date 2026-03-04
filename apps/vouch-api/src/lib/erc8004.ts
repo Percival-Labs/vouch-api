@@ -165,6 +165,27 @@ export async function fetchRegistrationFile(
     }
 
     if (uri.startsWith('http://') || uri.startsWith('https://')) {
+      // M5 fix: Block SSRF to private/internal networks
+      try {
+        const url = new URL(uri);
+        const host = url.hostname;
+        if (
+          host === 'localhost' ||
+          host === '127.0.0.1' ||
+          host === '0.0.0.0' ||
+          host === '::1' ||
+          host.startsWith('10.') ||
+          host.startsWith('192.168.') ||
+          /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+          host.startsWith('169.254.') ||
+          host.endsWith('.internal') ||
+          host.endsWith('.local')
+        ) {
+          console.warn(`[erc8004] Blocked SSRF attempt to private host: ${host}`);
+          return null;
+        }
+      } catch { return null; }
+
       const res = await fetch(uri, { signal: AbortSignal.timeout(10_000) });
       if (!res.ok) return null;
       return await res.json() as Record<string, unknown>;

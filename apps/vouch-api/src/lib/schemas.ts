@@ -393,3 +393,33 @@ export function validate<T>(
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// M1 fix: Skill creation schema (was missing — service layer validated but no Zod at route)
+// ---------------------------------------------------------------------------
+
+export const CreateSkillSchema = z.object({
+  name: z.string().min(1, "Name is required").max(200).transform((s) => s.trim()),
+  slug: z.string().min(2).max(100).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "Slug must be lowercase alphanumeric with hyphens"),
+  description: z.string().min(1, "Description is required").max(10000).transform((s) => s.trim()),
+  price_sats: z.number().int().positive().min(1).max(100_000_000),
+  royalty_rate_bps: z.number().int().min(0).max(5000).default(1000),
+  tags: z.array(z.string().min(1).max(50).regex(/^[a-z0-9-]+$/)).max(20).optional(),
+  content_hash: z.string().max(128).optional(),
+  source_url: z.string().url().max(2000).startsWith("https://").optional(),
+});
+
+// ---------------------------------------------------------------------------
+// M2 fix: Credit deposit and batch schemas (were missing)
+// ---------------------------------------------------------------------------
+
+export const CreditDepositSchema = z.object({
+  amount_sats: z.number().int().positive().min(100).max(100_000_000),
+});
+
+export const CreditBatchSchema = z.object({
+  budget_sats: z.number().int().positive().min(100).max(100_000_000),
+  token_count: z.number().int().positive().min(1).max(10000),
+});
+
+// AgentUpdateSchema already defined above (line 59) — now wired into PATCH /me route

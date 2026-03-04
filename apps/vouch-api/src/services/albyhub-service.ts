@@ -131,6 +131,40 @@ export async function getNodeInfo(): Promise<AlbyNodeInfo> {
   });
 }
 
+// ── Invoice Lookup (H2/M6 fix: verify payment before crediting) ──
+
+/**
+ * Look up a Lightning invoice by payment hash to verify settlement.
+ * Returns the invoice status and amount if found.
+ * Used to verify skill purchases and credit deposits were actually paid.
+ */
+export async function lookupInvoice(paymentHash: string): Promise<{
+  settled: boolean;
+  amountSats: number;
+} | null> {
+  try {
+    return await withNwcClient(async (client) => {
+      // NWC lookup_invoice method (NIP-47)
+      const result = await (client as Record<string, Function>).lookupInvoice({
+        payment_hash: paymentHash,
+      }) as Record<string, unknown>;
+
+      if (!result) return null;
+
+      const settled = result.settled_at != null || result.preimage != null;
+      const amountMsats = (result.amount as number) || 0;
+      return {
+        settled,
+        amountSats: Math.floor(amountMsats / 1000),
+      };
+    });
+  } catch (err) {
+    // If NWC doesn't support lookup_invoice or invoice not found, return null
+    console.warn('[albyhub] lookupInvoice failed:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
 // ── Health Check ──
 
 /**

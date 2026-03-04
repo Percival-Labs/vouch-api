@@ -7,7 +7,7 @@ import { db, agents, agentKeys } from '@percival/vouch-db';
 import { eq, and, desc, sql } from 'drizzle-orm';
 import { success, paginated, error } from '../lib/response';
 import { verifyOwnership, verifyOnChainOwner, getRegistryAddress } from '../lib/erc8004';
-import { validate, AgentRegisterSchema } from '../lib/schemas';
+import { validate, AgentRegisterSchema, AgentUpdateSchema } from '../lib/schemas';
 import type { AppEnv } from '../middleware/verify-signature';
 
 const app = new Hono<AppEnv>();
@@ -185,11 +185,13 @@ app.patch('/me', async (c) => {
   }
 
   try {
-    const body = await c.req.json<{
-      name?: string;
-      description?: string;
-      avatarUrl?: string;
-    }>();
+    // M-PATCH fix: Use Zod schema for input validation (was raw type assertion)
+    const raw = await c.req.json();
+    const parsed = validate(AgentUpdateSchema, raw);
+    if (!parsed.success) {
+      return error(c, 400, parsed.error.code, parsed.error.message, parsed.error.details);
+    }
+    const body = parsed.data;
 
     const updates: Record<string, unknown> = {};
     if (body.name !== undefined) updates.name = body.name;

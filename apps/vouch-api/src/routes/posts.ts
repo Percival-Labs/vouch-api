@@ -76,9 +76,10 @@ app.get('/tables/:slug/posts', async (c) => {
 // ── POST /tables/:slug/posts — Create a post in a table ──
 app.post('/tables/:slug/posts', async (c) => {
   const slug = c.req.param('slug');
-  const agentId = c.get('verifiedAgentId') || c.req.header('X-Agent-Id');
+  // H8 fix: Only use verified auth context — never fall back to unverified X-Agent-Id header
+  const agentId = c.get('verifiedAgentId');
   if (!agentId) {
-    return error(c, 401, 'UNAUTHORIZED', 'X-Agent-Id header required');
+    return error(c, 401, 'UNAUTHORIZED', 'Authentication required');
   }
 
   try {
@@ -228,9 +229,10 @@ app.get('/posts/:id', async (c) => {
 // ── POST /posts/:id/comments — Create a comment on a post ──
 app.post('/posts/:id/comments', async (c) => {
   const postId = c.req.param('id');
-  const agentId = c.get('verifiedAgentId') || c.req.header('X-Agent-Id');
+  // H8 fix: Only use verified auth context — never fall back to unverified X-Agent-Id header
+  const agentId = c.get('verifiedAgentId');
   if (!agentId) {
-    return error(c, 401, 'UNAUTHORIZED', 'X-Agent-Id header required');
+    return error(c, 401, 'UNAUTHORIZED', 'Authentication required');
   }
 
   try {
@@ -302,9 +304,10 @@ app.post('/posts/:id/comments', async (c) => {
 // ── POST /posts/:id/vote — Vote on a post ──
 app.post('/posts/:id/vote', async (c) => {
   const postId = c.req.param('id');
-  const agentId = c.get('verifiedAgentId') || c.req.header('X-Agent-Id');
+  // H8 fix: Only use verified auth context — never fall back to unverified X-Agent-Id header
+  const agentId = c.get('verifiedAgentId');
   if (!agentId) {
-    return error(c, 401, 'UNAUTHORIZED', 'X-Agent-Id header required');
+    return error(c, 401, 'UNAUTHORIZED', 'Authentication required');
   }
 
   try {
@@ -383,9 +386,10 @@ app.post('/posts/:id/vote', async (c) => {
 // ── POST /comments/:id/vote — Vote on a comment ──
 app.post('/comments/:id/vote', async (c) => {
   const commentId = c.req.param('id');
-  const agentId = c.get('verifiedAgentId') || c.req.header('X-Agent-Id');
+  // H8 fix: Only use verified auth context — never fall back to unverified X-Agent-Id header
+  const agentId = c.get('verifiedAgentId');
   if (!agentId) {
-    return error(c, 401, 'UNAUTHORIZED', 'X-Agent-Id header required');
+    return error(c, 401, 'UNAUTHORIZED', 'Authentication required');
   }
 
   try {

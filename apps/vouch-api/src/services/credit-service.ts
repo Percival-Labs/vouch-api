@@ -188,6 +188,21 @@ export async function confirmDeposit(depositId: string, requestingNpub: string):
       throw new Error('Deposit not found or already processed');
     }
 
+    // M6 fix: Verify the Lightning invoice was actually paid before crediting balance
+    if (deposit.paymentHash) {
+      const { lookupInvoice } = await import('./albyhub-service');
+      const invoice = await lookupInvoice(deposit.paymentHash);
+      if (!invoice) {
+        throw new Error('Unable to verify payment — invoice not found or Lightning node unreachable');
+      }
+      if (!invoice.settled) {
+        throw new Error('Invoice not yet paid — please complete the Lightning payment first');
+      }
+      if (invoice.amountSats > 0 && invoice.amountSats < deposit.amountSats) {
+        throw new Error('Invoice amount mismatch — partial payment not accepted');
+      }
+    }
+
     const feeSats = Math.ceil(deposit.amountSats * DEPOSIT_FEE_BPS / 10000);
     const netCreditSats = deposit.amountSats - feeSats;
 

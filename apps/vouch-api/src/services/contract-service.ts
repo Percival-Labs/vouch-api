@@ -901,98 +901,116 @@ export async function rejectMilestone(
  * Charges customer NWC → pays agent NWC. Records payment_event.
  */
 export async function releaseMilestonePayment(contractId: string, milestoneId: string) {
-  const [contract] = await db
-    .select()
-    .from(contracts)
-    .where(eq(contracts.id, contractId))
-    .limit(1);
+  // H1 fix: Wrap in transaction with FOR UPDATE to prevent double-payment race condition
+  const result = await db.transaction(async (tx) => {
+    const [contract] = await tx
+      .select()
+      .from(contracts)
+      .where(eq(contracts.id, contractId))
+      .for('update');
 
-  if (!contract) throw new Error('Contract not found');
-  if (!contract.nwcConnectionId) throw new Error('Contract has no NWC connection');
+    if (!contract) throw new Error('Contract not found');
+    if (!contract.nwcConnectionId) throw new Error('Contract has no NWC connection');
 
-  const [milestone] = await db
-    .select()
-    .from(contractMilestones)
-    .where(and(
-      eq(contractMilestones.id, milestoneId),
-      eq(contractMilestones.contractId, contractId),
-    ))
-    .limit(1);
+    const [milestone] = await tx
+      .select()
+      .from(contractMilestones)
+      .where(and(
+        eq(contractMilestones.id, milestoneId),
+        eq(contractMilestones.contractId, contractId),
+      ))
+      .for('update');
 
-  if (!milestone) throw new Error('Milestone not found');
-  if (milestone.status !== 'accepted' && !(milestone.isRetention && milestone.status === 'pending')) {
-    throw new Error(`Cannot release payment for milestone in status "${milestone.status}"`);
-  }
+    if (!milestone) throw new Error('Milestone not found');
 
-  const purpose = milestone.isRetention ? 'contract_retention' : 'contract_milestone';
-
-  try {
-    // Dynamic import to avoid circular deps (matching staking-service pattern)
-    const { executeSlash } = await import('./nwc-service');
-    const { paymentHash } = await executeSlash(
-      contract.nwcConnectionId,
-      milestone.amountSats,
-      `Contract ${contract.title}: ${milestone.title}`,
-    );
-
-    // Record payment event
-    await db.insert(paymentEvents).values({
-      id: ulid(),
-      paymentHash,
-      amountSats: milestone.amountSats,
-      purpose: purpose as 'contract_milestone' | 'contract_retention',
-      status: 'paid',
-      contractId,
-      milestoneId,
-      nwcConnectionId: contract.nwcConnectionId,
-    });
-
-    // Mark milestone as released
-    await db
-      .update(contractMilestones)
-      .set({
-        status: 'released',
-        releasedAt: new Date(),
-        paymentHash,
-      })
-      .where(eq(contractMilestones.id, milestoneId));
-
-    await logEvent(contractId, 'milestone_released', contract.customerPubkey, {
-      milestone_id: milestoneId,
-      amount_sats: milestone.amountSats,
-      payment_hash: paymentHash,
-    });
-
-    // TODO: Pay agent NWC (payYield pattern) once agent NWC connections are tracked
-    // For now, payment goes to platform treasury and manual disbursement
-
-    // Trigger royalty payments if the agent used skills (non-blocking, matching existing pattern)
-    const milestoneSkillsUsed = milestone.skillsUsed as string[] | null;
-    if (milestoneSkillsUsed && milestoneSkillsUsed.length > 0) {
-      calculateRoyalties(contractId, milestoneId, contract.agentPubkey, milestone.amountSats, milestoneSkillsUsed)
-        .then((calculations) => recordRoyalties(contractId, milestoneId, milestone.amountSats, calculations))
-        .then((royaltyIds) => executeRoyaltyPayments(royaltyIds))
-        .catch((err) => {
-          console.error(`[contracts] Royalty processing failed for milestone ${milestoneId}:`, err instanceof Error ? err.message : err);
-        });
+    // Idempotency guard: already released = no-op
+    if (milestone.status === 'released') {
+      return { paymentHash: milestone.paymentHash ?? 'already_released', amountSats: milestone.amountSats, alreadyReleased: true };
     }
 
-    return { paymentHash, amountSats: milestone.amountSats };
-  } catch (err) {
-    // Record failed payment
-    await db.insert(paymentEvents).values({
-      id: ulid(),
-      paymentHash: `failed_${ulid()}`,
-      amountSats: milestone.amountSats,
-      purpose: purpose as 'contract_milestone' | 'contract_retention',
-      status: 'failed',
-      contractId,
-      milestoneId,
-      nwcConnectionId: contract.nwcConnectionId,
-      metadata: { error: err instanceof Error ? err.message : 'Unknown error' },
-    });
-    throw err;
+    if (milestone.status !== 'accepted' && !(milestone.isRetention && milestone.status === 'pending')) {
+      throw new Error(`Cannot release payment for milestone in status "${milestone.status}"`);
+    }
+
+    const purpose = milestone.isRetention ? 'contract_retention' : 'contract_milestone';
+
+    try {
+      // Dynamic import to avoid circular deps (matching staking-service pattern)
+      const { executeSlash } = await import('./nwc-service');
+      const { paymentHash } = await executeSlash(
+        contract.nwcConnectionId,
+        milestone.amountSats,
+        `Contract ${contract.title}: ${milestone.title}`,
+      );
+
+      // Record payment event
+      await tx.insert(paymentEvents).values({
+        id: ulid(),
+        paymentHash,
+        amountSats: milestone.amountSats,
+        purpose: purpose as 'contract_milestone' | 'contract_retention',
+        status: 'paid',
+        contractId,
+        milestoneId,
+        nwcConnectionId: contract.nwcConnectionId,
+      });
+
+      // Mark milestone as released
+      await tx
+        .update(contractMilestones)
+        .set({
+          status: 'released',
+          releasedAt: new Date(),
+          paymentHash,
+        })
+        .where(eq(contractMilestones.id, milestoneId));
+
+      await logEvent(contractId, 'milestone_released', contract.customerPubkey, {
+        milestone_id: milestoneId,
+        amount_sats: milestone.amountSats,
+        payment_hash: paymentHash,
+      });
+
+      return { paymentHash, amountSats: milestone.amountSats, alreadyReleased: false };
+    } catch (err) {
+      // Record failed payment
+      await tx.insert(paymentEvents).values({
+        id: ulid(),
+        paymentHash: `failed_${ulid()}`,
+        amountSats: milestone.amountSats,
+        purpose: purpose as 'contract_milestone' | 'contract_retention',
+        status: 'failed',
+        contractId,
+        milestoneId,
+        nwcConnectionId: contract.nwcConnectionId,
+        metadata: { error: err instanceof Error ? err.message : 'Unknown error' },
+      });
+      throw err;
+    }
+  });
+
+  // Trigger royalty payments outside the transaction (non-blocking, matching existing pattern)
+  if (!result.alreadyReleased) {
+    // Re-read milestone for skillsUsed (outside transaction)
+    const [milestone] = await db.select().from(contractMilestones)
+      .where(eq(contractMilestones.id, milestoneId)).limit(1);
+    const [contract] = await db.select().from(contracts)
+      .where(eq(contracts.id, contractId)).limit(1);
+
+    if (milestone && contract) {
+      const milestoneSkillsUsed = milestone.skillsUsed as string[] | null;
+      if (milestoneSkillsUsed && milestoneSkillsUsed.length > 0) {
+        calculateRoyalties(contractId, milestoneId, contract.agentPubkey, milestone.amountSats, milestoneSkillsUsed)
+          .then((calculations) => recordRoyalties(contractId, milestoneId, milestone.amountSats, calculations))
+          .then((royaltyIds) => executeRoyaltyPayments(royaltyIds))
+          .catch((err) => {
+            console.error(`[contracts] Royalty processing failed for milestone ${milestoneId}:`, err instanceof Error ? err.message : err);
+          });
+      }
+    }
   }
+
+  return { paymentHash: result.paymentHash, amountSats: result.amountSats };
 }
 
 /**
@@ -1108,8 +1126,17 @@ export async function approveChangeOrder(
       })
       .where(eq(contractChangeOrders.id, changeOrderId));
 
-    // Apply cost delta to contract total
+    // H3 fix: Guard against change orders that would make totalSats negative or below paidSats
     if (co.costDeltaSats !== 0) {
+      const newTotal = contract.totalSats + co.costDeltaSats;
+      const paidSats = contract.paidSats ?? 0;
+      if (newTotal < 0) {
+        throw new Error('Change order would reduce contract total below zero');
+      }
+      if (newTotal < paidSats) {
+        throw new Error('Change order would reduce contract total below already-paid amount');
+      }
+
       await tx
         .update(contracts)
         .set({

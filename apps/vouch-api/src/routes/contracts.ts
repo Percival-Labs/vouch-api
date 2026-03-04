@@ -95,8 +95,9 @@ app.get('/', async (c) => {
   try {
     const status = c.req.query('status');
     const role = (c.req.query('role') || 'any') as 'customer' | 'agent' | 'any';
-    const page = parseInt(c.req.query('page') || '1', 10);
-    const limit = parseInt(c.req.query('limit') || '25', 10);
+    // M3 fix: Cap pagination to prevent unbounded queries
+    const page = Math.max(1, parseInt(c.req.query('page') || '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '25', 10)));
 
     const result = await listContracts(pubkey, role, status, page, limit);
     return paginated(c, result.data, result.meta);
@@ -463,8 +464,9 @@ app.get('/:id/events', async (c) => {
       return error(c, 403, 'FORBIDDEN', 'Not a party to this contract');
     }
 
-    const page = parseInt(c.req.query('page') || '1', 10);
-    const limit = parseInt(c.req.query('limit') || '50', 10);
+    // M4 fix: Cap pagination to prevent unbounded queries
+    const page = Math.max(1, parseInt(c.req.query('page') || '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '50', 10)));
     const result = await getContractEvents(contractId, page, limit);
     return paginated(c, result.data, result.meta);
   } catch (err) {

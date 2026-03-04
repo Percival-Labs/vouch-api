@@ -68,7 +68,8 @@ const ALLOWED_ORIGINS = (process.env.VOUCH_CORS_ORIGINS || 'http://localhost:360
 app.use('*', cors({
   origin: (origin) => ALLOWED_ORIGINS.includes(origin) ? origin : '',
   allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization', 'X-Agent-Id', 'X-Timestamp', 'X-Signature', 'X-Nonce', 'Cookie', 'X-Gateway-Secret'],
+  // L1 fix: Removed X-Gateway-Secret from CORS (server-to-server only, not browser)
+  allowHeaders: ['Content-Type', 'Authorization', 'X-Agent-Id', 'X-Timestamp', 'X-Signature', 'X-Nonce', 'Cookie'],
   exposeHeaders: ['Set-Cookie', 'X-Vouch-API-Version', 'X-Vouch-Docs', 'X-Vouch-LLMs-Txt'],
   maxAge: 3600,
   credentials: true,
