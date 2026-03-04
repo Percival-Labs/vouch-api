@@ -1,0 +1,55 @@
+Business Source License 1.1
+
+Licensor: Percival Labs LLC
+Licensed Work: Percival Labs Vouch API
+Change Date: March 4, 2030
+Change License: Apache License, Version 2.0
+
+Terms
+
+The Licensor hereby grants you the right to copy, modify, create derivative
+works, redistribute, and make non-production use of the Licensed Work. The
+Licensor may make an Additional Use Grant, below.
+
+Additional Use Grant:
+You may use the Licensed Work for non-commercial evaluation, development,
+and testing purposes. Production deployment of the Licensed Work or any
+derivative work requires a commercial license from the Licensor.
+
+You may not use the Licensed Work in production, offer it as a hosted service,
+or otherwise make it available to third parties in a production capacity
+without a separate commercial agreement with the Licensor.
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Licensed Work.
+
+Change Date and Change License
+
+On the Change Date, or the fourth anniversary of the first publicly available
+distribution of a specific version of the Licensed Work under this License,
+whichever comes first, the Licensor hereby grants you rights under the terms
+of the Change License, and the rights granted in the paragraph above terminate.
+
+If the Change Date is not specified, the Change Date is four years from the
+date the Licensed Work is first made publicly available under this License.
+
+Disclaimer
+
+THE LICENSED WORK IS PROVIDED "AS IS". THE LICENSOR HEREBY DISCLAIMS ALL
+WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF, OR IN CONNECTION WITH THE LICENSED WORK OR THE USE OR OTHER DEALINGS
+IN THE LICENSED WORK.
+
+Notice
+
+Business Source License 1.1 is not an Open Source license. However, the
+Licensed Work will eventually be made available under an Open Source License,
+as stated in this License.
+
+For more information on the Business Source License, see
+https://mariadb.com/bsl11/
+
+Copyright (c) 2026 Percival Labs LLC. All rights reserved.
