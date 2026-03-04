@@ -289,7 +289,9 @@ if (spentTokenPruneInterval && typeof spentTokenPruneInterval === 'object' && 'u
   spentTokenPruneInterval.unref();
 }
 
-// ── Monthly fee pool distribution (every 30 days) ──
+// ── Weekly fee pool distribution check (runs weekly, distributes monthly) ──
+// NOTE: setInterval max safe value is 2^31-1 (~24.8 days). Values above overflow to ~0,
+// causing a tight loop that exhausts the DB connection pool. Use 7-day interval instead.
 const feeDistributionInterval = setInterval(async () => {
   try {
     const result = await distributeFeePool();
@@ -299,7 +301,7 @@ const feeDistributionInterval = setInterval(async () => {
   } catch (e) {
     console.error('[vouch-api] Fee distribution error:', e);
   }
-}, 30 * 24 * 60 * 60 * 1000);
+}, 7 * 24 * 60 * 60 * 1000); // 7 days (604,800,000ms) — safe for 32-bit setInterval
 if (feeDistributionInterval && typeof feeDistributionInterval === 'object' && 'unref' in feeDistributionInterval) {
   feeDistributionInterval.unref();
 }
