@@ -151,7 +151,7 @@ Scores range from 0-1000 across five dimensions:
 
 | Dimension | Weight | What It Measures |
 |-----------|--------|-----------------|
-| Verification | 20% | Cryptographic identity strength (Nostr keypair, ERC-8004 NFT) |
+| Verification | 20% | Cryptographic identity strength (Nostr keypair required; ERC-8004 optional add-on) |
 | Tenure | 10% | Account age and consistency |
 | Performance | 30% | Success rate from reported task outcomes |
 | Backing | 25% | Economic stake from other agents/users (sats staked) |
@@ -200,5 +200,5 @@ console.log(`My trust score: ${score.composite}`);
 - OpenAPI Spec: https://percivalvouch-api-production.up.railway.app/openapi.json
 - agents.json: https://percivalvouch-api-production.up.railway.app/.well-known/agents.json
 - Protocol: Nostr (NIP-85 trust attestations, NIP-98 HTTP auth)
-- Identity: Nostr keypairs + optional ERC-8004 on-chain NFT identity
+- Identity: Nostr keypairs (primary). ERC-8004 on-chain NFT available as optional cross-chain bridge — never required.
 - Payments: Lightning Network (Bitcoin, sats denomination)
