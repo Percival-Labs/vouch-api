@@ -498,9 +498,9 @@ app.get('/contracts', async (c) => {
     // Import contracts schema lazily to avoid circular deps
     const { contracts, contractMilestones } = await import('@percival/vouch-db');
 
-    // Map 'open' to contracts in draft/awaiting_funding (seeking bids)
+    // Map 'open' to contracts seeking bids (draft, awaiting_funding, or active)
     const statusFilter = status === 'open'
-      ? sql`${contracts.status} IN ('draft', 'awaiting_funding')`
+      ? sql`${contracts.status} IN ('draft', 'awaiting_funding', 'active')`
       : eq(contracts.status, status);
 
     const rows = await db.select({
@@ -805,6 +805,173 @@ app.get('/stats/flywheel', async (c) => {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[public] GET /stats/flywheel error:', message);
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to compute flywheel stats');
+  }
+});
+
+// ── GET /storefronts/:slug — Public storefront profile by slug ──
+app.get('/storefronts/:slug', async (c) => {
+  const slug = c.req.param('slug');
+
+  try {
+    const { getStorefrontBySlug } = await import('../services/storefront-service');
+    const storefront = await getStorefrontBySlug(slug);
+
+    if (!storefront) {
+      return error(c, 404, 'NOT_FOUND', 'Storefront not found');
+    }
+
+    return success(c, storefront);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[public] GET /storefronts/${slug} error:`, message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to get storefront');
+  }
+});
+
+// ── GET /storefronts/:slug/listings — Browse storefront listings (paginated, filtered) ──
+app.get('/storefronts/:slug/listings', async (c) => {
+  const slug = c.req.param('slug');
+
+  try {
+    const category = c.req.query('category');
+    const tag = c.req.query('tag');
+    const search = c.req.query('search');
+    const sort = c.req.query('sort') || 'createdAt';
+    const dir = c.req.query('dir') || 'desc';
+    const page = Math.max(1, parseInt(c.req.query('page') || '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '20', 10)));
+
+    // Resolve slug to storefront ID
+    const { getStorefrontBySlug, listStorefrontListings } = await import('../services/storefront-service');
+    const storefront = await getStorefrontBySlug(slug);
+    if (!storefront) {
+      return error(c, 404, 'NOT_FOUND', 'Storefront not found');
+    }
+
+    // Map sort param to ListingFilters sortBy
+    const sortByMap: Record<string, 'purchaseCount' | 'avgRating' | 'createdAt' | 'priceSats'> = {
+      popular: 'purchaseCount',
+      rating: 'avgRating',
+      newest: 'createdAt',
+      price: 'priceSats',
+      purchaseCount: 'purchaseCount',
+      avgRating: 'avgRating',
+      createdAt: 'createdAt',
+      priceSats: 'priceSats',
+    };
+    const sortBy = sortByMap[sort] || 'createdAt';
+    const sortDir = dir === 'asc' ? 'asc' as const : 'desc' as const;
+
+    const result = await listStorefrontListings(storefront.id, {
+      category: category || undefined,
+      tag: tag || undefined,
+      search: search || undefined,
+      sortBy,
+      sortDir,
+      page,
+      limit,
+    });
+
+    return c.json({ data: result.data, meta: result.meta });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[public] GET /storefronts/${slug}/listings error:`, message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to list storefront listings');
+  }
+});
+
+// ── GET /storefronts/:slug/listings/:lid — Listing detail (public) ──
+app.get('/storefronts/:slug/listings/:lid', async (c) => {
+  const slug = c.req.param('slug');
+  const listingId = c.req.param('lid');
+
+  try {
+    const { getListing } = await import('../services/storefront-service');
+    const result = await getListing(listingId);
+
+    if (!result) {
+      return error(c, 404, 'NOT_FOUND', 'Listing not found');
+    }
+
+    // Verify the listing belongs to the storefront identified by slug
+    if (result.storefront.slug !== slug) {
+      return error(c, 404, 'NOT_FOUND', 'Listing not found');
+    }
+
+    // Don't expose delisted listings publicly
+    if (result.listing.status !== 'active') {
+      return error(c, 404, 'NOT_FOUND', 'Listing not found');
+    }
+
+    return success(c, {
+      listing: result.listing,
+      storefront: {
+        id: result.storefront.id,
+        name: result.storefront.name,
+        slug: result.storefront.slug,
+      },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[public] GET /storefronts/${slug}/listings/${listingId} error:`, message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to get listing');
+  }
+});
+
+// ── GET /listings — Cross-storefront search/browse (public) ──
+app.get('/listings', async (c) => {
+  try {
+    const category = c.req.query('category');
+    const tag = c.req.query('tag');
+    const search = c.req.query('search');
+    const sort = c.req.query('sort') || 'createdAt';
+    const dir = c.req.query('dir') || 'desc';
+    const page = Math.max(1, parseInt(c.req.query('page') || '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '20', 10)));
+
+    // Map sort param to ListingFilters sortBy
+    const sortByMap: Record<string, 'purchaseCount' | 'avgRating' | 'createdAt' | 'priceSats'> = {
+      popular: 'purchaseCount',
+      rating: 'avgRating',
+      newest: 'createdAt',
+      price: 'priceSats',
+      purchaseCount: 'purchaseCount',
+      avgRating: 'avgRating',
+      createdAt: 'createdAt',
+      priceSats: 'priceSats',
+    };
+    const sortBy = sortByMap[sort] || 'createdAt';
+    const sortDir = dir === 'asc' ? 'asc' as const : 'desc' as const;
+
+    // Use listPublicListings for general browsing, searchListings for text search
+    if (search) {
+      const { searchListings } = await import('../services/storefront-service');
+      const result = await searchListings(search, {
+        category: category || undefined,
+        tag: tag || undefined,
+        sortBy,
+        sortDir,
+        page,
+        limit,
+      });
+      return c.json({ data: result.data, meta: result.meta });
+    }
+
+    const { listPublicListings } = await import('../services/storefront-service');
+    const result = await listPublicListings({
+      category: category || undefined,
+      tag: tag || undefined,
+      sortBy,
+      sortDir,
+      page,
+      limit,
+    });
+
+    return c.json({ data: result.data, meta: result.meta });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[public] GET /listings error:', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to search listings');
   }
 });
 
