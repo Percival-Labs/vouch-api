@@ -1,8 +1,9 @@
 // Vouch — Trust Score Computation Engine
 // Pure computation module — no database dependencies.
 // Implements the 6-dimension Vouch Score model:
-//   Verification (20%), Tenure (10%), Performance (30%), Backing (25%), Community (15%)
+//   Verification (15%), Tenure (10%), Performance (25%), Backing (20%), Community (15%), Behavioral Fidelity (15%)
 // The backing dimension is what makes this a Vouch Score instead of just a trust score.
+// Behavioral fidelity (MCP-T v0.2.0) measures how closely agent behavior matches declared intent.
 
 // ── Types ──
 
@@ -31,6 +32,8 @@ export interface TrustScoreParams {
   communityComponent?: number;
   /** Optional verification bonus (0-300), used for external attestation overlays like WoT. */
   verificationBonus?: number;
+  /** Behavioral fidelity component (0-1000). When omitted, defaults to 500 (neutral). */
+  behavioralFidelityComponent?: number;
   /**
    * Creator-consumer multiplier (Phase 4 flywheel).
    * Agents who both create AND consume skills get a 1.5x performance growth rate.
@@ -46,6 +49,7 @@ export interface VouchDimensionBreakdown {
   performance: number;
   backing: number;
   community: number;
+  behavioralFidelity: number;
 }
 
 export interface VouchScoreResult {
@@ -71,11 +75,12 @@ const CHIVALRY_PENALTY_PER_VIOLATION = 200;
 
 /** Vouch Score dimension weights (must sum to 1.0) */
 export const VOUCH_DIMENSIONS = {
-  verification: { weight: 0.20 },
+  verification: { weight: 0.15 },
   tenure: { weight: 0.10 },
-  performance: { weight: 0.30 },
-  backing: { weight: 0.25 },
+  performance: { weight: 0.25 },
+  backing: { weight: 0.20 },
   community: { weight: 0.15 },
+  behavioral_fidelity: { weight: 0.15 },
 } as const;
 
 // Keep old export name for back-compat
@@ -147,12 +152,15 @@ export function computeVouchScore(params: TrustScoreParams): VouchScoreResult {
   const multiplier = params.performanceMultiplier ?? 1.0;
   const boostedPerformance = Math.min(1000, Math.round(rawPerformance * multiplier));
 
+  const behavioralFidelity = clamp(params.behavioralFidelityComponent ?? 500, 0, 1000);
+
   const dimensions: VouchDimensionBreakdown = {
     verification,
     tenure: computeTenure(params.accountCreatedAt),
     performance: boostedPerformance,
     backing: params.backingComponent ?? 0,
     community,
+    behavioralFidelity,
   };
 
   const composite = Math.round(
@@ -160,7 +168,8 @@ export function computeVouchScore(params: TrustScoreParams): VouchScoreResult {
     + dimensions.tenure * VOUCH_DIMENSIONS.tenure.weight
     + dimensions.performance * VOUCH_DIMENSIONS.performance.weight
     + dimensions.backing * VOUCH_DIMENSIONS.backing.weight
-    + dimensions.community * VOUCH_DIMENSIONS.community.weight,
+    + dimensions.community * VOUCH_DIMENSIONS.community.weight
+    + dimensions.behavioralFidelity * VOUCH_DIMENSIONS.behavioral_fidelity.weight,
   );
 
   return {

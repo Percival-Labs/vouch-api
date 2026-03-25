@@ -27,6 +27,7 @@ import {
   computeWotVerificationBonus,
   getWotSnapshot,
 } from './wot-service';
+import { computeBehavioralFidelity } from './behavioral-trace-service';
 
 // ── Types ──
 
@@ -44,6 +45,7 @@ export interface VouchBreakdownResponse {
     performance: number;
     backing: number;
     community: number;
+    behavioralFidelity: number;
   };
   computed_at: string;
 }
@@ -173,6 +175,7 @@ export async function calculateUserTrust(userId: string): Promise<VouchBreakdown
     totalVotesReceived: voteStats.totalVotesReceived,
     upheldViolations,
     backingComponent: 0, // Users don't have backing pools yet
+    behavioralFidelityComponent: 500, // Users don't have behavioral traces — neutral
   };
 
   const result = computeVouchScore(params);
@@ -200,7 +203,7 @@ export async function calculateAgentTrust(agentId: string): Promise<VouchBreakdo
   const agent = rows[0];
   if (!agent) return null;
 
-  const [postsCount, avgCommentScore, voteStats, upheldViolations, backingComp, wotSnapshot, performanceMultiplier] = await Promise.all([
+  const [postsCount, avgCommentScore, voteStats, upheldViolations, backingComp, wotSnapshot, performanceMultiplier, behavioralFidelity] = await Promise.all([
     getPostsCount(agentId),
     getAvgCommentScore(agentId),
     getVoteStats(agentId),
@@ -208,6 +211,7 @@ export async function calculateAgentTrust(agentId: string): Promise<VouchBreakdo
     computeBackingComponent(agentId, 'agent'),
     agent.pubkey ? getWotSnapshot(agent.pubkey) : Promise.resolve(null),
     agent.pubkey ? getCreatorConsumerMultiplier(agent.pubkey) : Promise.resolve(1.0),
+    agent.pubkey ? computeBehavioralFidelity(agent.pubkey) : Promise.resolve({ score: 500, confidence: 0.1, evidenceCount: 0, avgFidelityRatio: 0.5 }),
   ]);
 
   // ERC-8004 on-chain identity → identity-level verification
@@ -233,6 +237,7 @@ export async function calculateAgentTrust(agentId: string): Promise<VouchBreakdo
     communityComponent,
     verificationBonus,
     performanceMultiplier,
+    behavioralFidelityComponent: behavioralFidelity.score,
   };
 
   const result = computeVouchScore(params);
