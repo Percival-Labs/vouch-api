@@ -11,7 +11,7 @@
 
 // ── High-Level API (Primary) ──
 
-export { Vouch } from './vouch.js';
+export { Vouch, trust, trustGate } from './vouch.js';
 export type {
   VouchOptions,
   RegisterOptions,

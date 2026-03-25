@@ -11,8 +11,8 @@ export const poolStatusEnum = pgEnum('pool_status', ['active', 'frozen', 'dissol
 export const stakeStatusEnum = pgEnum('stake_status', ['pending', 'active', 'unstaking', 'withdrawn', 'slashed']);
 export const snapshotReasonEnum = pgEnum('snapshot_reason', ['daily', 'stake_change', 'slash', 'milestone']);
 export const treasurySourceEnum = pgEnum('treasury_source', ['slash', 'platform_fee', 'donation']); // 'slash' is DEPRECATED — PL takes 0% of slashes. Kept for enum compatibility.
-export const paymentPurposeEnum = pgEnum('payment_purpose', ['stake', 'withdraw', 'yield', 'treasury_fee', 'contract_milestone', 'contract_retention', 'contract_refund']);
-export const paymentStatusEnum = pgEnum('payment_status', ['pending', 'paid', 'expired', 'failed']);
+export const paymentPurposeEnum = pgEnum('payment_purpose', ['stake', 'withdraw', 'yield', 'treasury_fee', 'contract_milestone', 'contract_retention', 'contract_refund', 'hold_lock', 'agent_payout']);
+export const paymentStatusEnum = pgEnum('payment_status', ['pending', 'paid', 'expired', 'failed', 'held']);
 export const nwcConnectionStatusEnum = pgEnum('nwc_connection_status', ['active', 'revoked', 'expired']);
 
 // ── Staking Pools (one per agent) ──

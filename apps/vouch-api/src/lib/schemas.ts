@@ -277,12 +277,14 @@ export const SubmitMilestoneSchema = z.object({
     .array(z.string().min(1, "Skill ID must not be empty").max(100, "Skill ID too long"))
     .max(20, "Maximum 20 skills per milestone")
     .optional(),
+  agent_bolt11: z.string().max(2000, "BOLT11 invoice too long").optional(),
 });
 
 export const SubmitBidSchema = z.object({
   approach: z.string().min(1, "Approach is required").max(5000, "Approach must be under 5000 characters"),
   cost_sats: z.number().int("Cost must be an integer").min(1, "Cost must be at least 1 sat").max(100_000_000, "Cost must be at most 100,000,000 sats"),
   estimated_days: z.number().int("Days must be an integer").min(1, "Must be at least 1 day").max(365, "Must be at most 365 days"),
+  payout_preference: z.enum(['lightning', 'gateway_credits']).default('lightning'),
 });
 
 const ISCCriterionSchema = z.object({
@@ -423,3 +425,128 @@ export const CreditBatchSchema = z.object({
 });
 
 // AgentUpdateSchema already defined above (line 59) — now wired into PATCH /me route
+
+// ---------------------------------------------------------------------------
+// Storefront schemas
+// ---------------------------------------------------------------------------
+
+export const CreateStorefrontSchema = z.object({
+  name: z.string().min(1).max(200).transform(s => s.trim()),
+  slug: z.string().min(2).max(100).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'Slug must be lowercase alphanumeric with hyphens'),
+  description: z.string().max(5000).optional(),
+  logo_url: z.string().url().max(2000).startsWith('https://').optional(),
+  banner_url: z.string().url().max(2000).startsWith('https://').optional(),
+  relay_urls: z.array(z.string().url().startsWith('wss://')).max(10).optional(),
+  settings: z.record(z.unknown()).optional(),
+});
+
+export const UpdateStorefrontSchema = z.object({
+  name: z.string().min(1).max(200).transform(s => s.trim()).optional(),
+  description: z.string().max(5000).optional(),
+  logo_url: z.string().url().max(2000).startsWith('https://').nullable().optional(),
+  banner_url: z.string().url().max(2000).startsWith('https://').nullable().optional(),
+  relay_urls: z.array(z.string().url().startsWith('wss://')).max(10).optional(),
+  settings: z.record(z.unknown()).optional(),
+});
+
+export const CreateListingSchema = z.object({
+  title: z.string().min(1).max(300).transform(s => s.trim()),
+  slug: z.string().min(2).max(100).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'Slug must be lowercase alphanumeric with hyphens'),
+  description: z.string().min(1).max(10000).transform(s => s.trim()),
+  price_sats: z.number().int().positive().min(1).max(100_000_000),
+  price_usd_cents: z.number().int().positive().optional(),
+  category: z.enum(['stl', 'svg', 'gcode', 'digital_art', 'ebook', 'other']),
+  file_hash: z.string().length(64).regex(/^[0-9a-fA-F]{64}$/, 'Must be SHA-256 hex'),
+  file_url: z.string().url().max(2000).startsWith('https://'),
+  file_size_bytes: z.number().int().positive().optional(),
+  preview_urls: z.array(z.string().url().max(2000).startsWith('https://')).max(10).optional(),
+  metadata: z.record(z.unknown()).optional(),
+  tags: z.array(z.string().min(1).max(50).regex(/^[a-z0-9-]+$/)).max(20).optional(),
+});
+
+export const UpdateListingSchema = z.object({
+  title: z.string().min(1).max(300).transform(s => s.trim()).optional(),
+  description: z.string().min(1).max(10000).transform(s => s.trim()).optional(),
+  price_sats: z.number().int().positive().min(1).max(100_000_000).optional(),
+  price_usd_cents: z.number().int().positive().nullable().optional(),
+  preview_urls: z.array(z.string().url().max(2000).startsWith('https://')).max(10).optional(),
+  metadata: z.record(z.unknown()).optional(),
+  tags: z.array(z.string().min(1).max(50).regex(/^[a-z0-9-]+$/)).max(20).optional(),
+});
+
+export const CheckoutSchema = z.object({
+  method: z.enum(['lightning', 'strike']),
+});
+
+export const ConfirmPurchaseSchema = z.object({
+  payment_hash: z.string().length(64).regex(/^[0-9a-fA-F]{64}$/, 'Must be a 64-character hex string'),
+});
+
+export const RateListingSchema = z.object({
+  rating: z
+    .number()
+    .int("Rating must be an integer")
+    .min(1, "Rating must be at least 1")
+    .max(5, "Rating must be at most 5"),
+  review: z.string().max(2000, "Review must be at most 2000 characters").optional(),
+});
+
+// ---------------------------------------------------------------------------
+// R4: SDK agent registration schema
+// ---------------------------------------------------------------------------
+
+export const SdkAgentRegisterSchema = z.object({
+  name: z.string().min(1).max(200).transform(s => s.trim()),
+  description: z.string().max(5000).optional(),
+  model: z.string().max(100).optional(),
+  capabilities: z.array(z.string().min(1).max(100)).max(50).optional(),
+});
+
+// ---------------------------------------------------------------------------
+// R5: SDK outcome reporting schema
+// ---------------------------------------------------------------------------
+
+export const SdkOutcomeSchema = z.object({
+  counterparty: z.string().min(1).max(200),
+  role: z.enum(['performer', 'purchaser', 'collaborator']),
+  task_type: z.string().min(1).max(100),
+  task_ref: z.string().max(500).optional(),
+  success: z.boolean(),
+  rating: z.number().int().min(1).max(5).optional(),
+  evidence: z.string().max(10000).optional(),
+});
+
+// ---------------------------------------------------------------------------
+// R6: Credit limits schema
+// ---------------------------------------------------------------------------
+
+export const CreditLimitsSchema = z.object({
+  daily_limit_sats: z.number().int().min(0).max(100_000_000).optional(),
+  per_request_limit_sats: z.number().int().min(0).max(10_000_000).optional(),
+});
+
+// ---------------------------------------------------------------------------
+// R7: Credit deposit confirm schema
+// ---------------------------------------------------------------------------
+
+export const CreditDepositConfirmSchema = z.object({
+  deposit_id: z.string().min(1).max(100),
+});
+
+// ---------------------------------------------------------------------------
+// R8: Privacy token issuance schema
+// ---------------------------------------------------------------------------
+
+export const IssueTokensSchema = z.object({
+  blinded_tokens: z.array(z.string().max(1000)).min(1).max(1000),
+  batch_hash: z.string().length(64).regex(/^[0-9a-fA-F]{64}$/),
+  budget_sats: z.number().int().positive().min(100).max(100_000_000),
+});
+
+// ---------------------------------------------------------------------------
+// R15: Fund contract schema
+// ---------------------------------------------------------------------------
+
+export const FundContractSchema = z.object({
+  nwc_connection_id: z.string().min(1, "NWC connection ID is required").max(100),
+});

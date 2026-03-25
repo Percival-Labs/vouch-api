@@ -1,13 +1,37 @@
 {
-  "name": "vouch-api-monorepo",
+  "name": "percival-labs",
+  "version": "0.2.0",
   "private": true,
-  "workspaces": ["packages/*", "apps/*"],
+  "workspaces": ["apps/*", "packages/*"],
   "scripts": {
-    "dev": "bun run --filter @percival/vouch-api dev",
-    "start": "bun run apps/vouch-api/src/index.ts",
-    "db:migrate": "bun run --filter @percival/vouch-db migrate",
-    "db:generate": "bun run --filter @percival/vouch-db generate",
-    "db:studio": "bun run --filter @percival/vouch-db studio",
-    "test": "bun test --recursive"
+    "dev": "bun run --filter @percival/registry dev",
+    "dev:agents": "bun run --filter @percival/agents dev",
+    "dev:verifier": "bun run --filter @percival/verifier dev",
+    "dev:web": "bun run --filter @percival/web dev",
+    "dev:website": "bun run --filter @percival/website dev",
+    "dev:terrarium": "bun run --filter @percival/terrarium dev",
+    "dev:vouch": "bun run --filter @percival/vouch dev",
+    "dev:vouch-api": "bun run --filter @percival/vouch-api dev",
+    "dev:discord": "bun run --filter @percival/discord dev",
+    "dev:village": "bun run --filter @percival/village dev",
+    "dev:all": "bun run dev & bun run dev:verifier & bun run dev:website & bun run dev:agents & bun run dev:terrarium",
+    "test": "bun test --recursive",
+    "test:registry": "bun test apps/registry/tests/",
+    "test:verifier": "bun test apps/verifier/tests/",
+    "seed": "bun run packages/db/src/seed.ts",
+    "seed:pai": "bun run packages/db/src/seed-pai.ts",
+    "x:post": "bun scripts/x/post.ts",
+    "x:queue": "bun scripts/x/post.ts --queue",
+    "x:preview": "bun scripts/x/post.ts --queue --dry-run"
+  },
+  "engines": {
+    "node": ">=20",
+    "bun": ">=1.0"
+  },
+  "devDependencies": {
+    "twitter-api-v2": "^1.29.0"
+  },
+  "dependencies": {
+    "@getalby/sdk": "^7.0.0"
   }
 }

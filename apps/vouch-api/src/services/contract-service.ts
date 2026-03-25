@@ -20,6 +20,7 @@ import {
   recordRoyalties,
   executeRoyaltyPayments,
 } from './royalty-service';
+import { encrypt, decrypt } from '../lib/encryption';
 
 // ── ISC Types ──
 
@@ -510,14 +511,19 @@ export async function activateContract(contractId: string, customerPubkey: strin
 }
 
 /**
- * Fund a contract by linking a customer's NWC connection.
- * Budget = totalSats. Same pattern as createStakeLock.
+ * Fund a contract by charging per-milestone invoices from the customer's NWC connection.
+ * Generates preimage + hash per milestone. Uses HOLD invoices (Path A) if supported,
+ * otherwise regular invoices to platform wallet (Path B).
  */
 export async function fundContract(
   contractId: string,
   customerPubkey: string,
   nwcConnectionId: string,
 ) {
+  // Import services dynamically to avoid circular deps
+  const albyhub = await import('./albyhub-service');
+  const { executeSlash } = await import('./nwc-service');
+
   return await db.transaction(async (tx) => {
     const [contract] = await tx
       .select()
@@ -542,9 +548,70 @@ export async function fundContract(
 
     if (!nwc) throw new Error('NWC connection not found or inactive');
 
+    // S6 fix: Verify NWC connection belongs to the customer (prevent charging another user's wallet)
+    if (nwc.userNpub !== customerPubkey) {
+      throw new Error('NWC connection does not belong to this user');
+    }
+
     const remaining = nwc.budgetSats - nwc.spentSats;
     if (remaining < contract.totalSats) {
       throw new Error(`NWC budget ${remaining} sats insufficient for contract ${contract.totalSats} sats`);
+    }
+
+    // Fetch milestones for per-milestone funding
+    const milestones = await tx
+      .select()
+      .from(contractMilestones)
+      .where(eq(contractMilestones.contractId, contractId))
+      .orderBy(asc(contractMilestones.sequence));
+
+    const milestoneInvoices: Array<{ milestoneId: string; bolt11: string; amountSats: number }> = [];
+
+    for (const ms of milestones) {
+      // Generate preimage + hash per milestone
+      const preimageBytes = crypto.getRandomValues(new Uint8Array(32));
+      const preimage = Buffer.from(preimageBytes).toString('hex');
+      const hashBytes = await crypto.subtle.digest('SHA-256', preimageBytes);
+      const holdPaymentHash = Buffer.from(new Uint8Array(hashBytes)).toString('hex');
+
+      // Charge customer via NWC (Path B: regular invoices to platform wallet)
+      // Path A (HOLD invoices) can be swapped in when we move to Voltage/LND
+      const { paymentHash: invoicePaymentHash } = await executeSlash(
+        nwcConnectionId,
+        ms.amountSats,
+        `Contract "${contract.title}": ${ms.title}`,
+      );
+
+      // S1 fix: Encrypt preimage before storage (AES-256-GCM)
+      const encryptedPreimage = await encrypt(preimage);
+
+      // Store hold data on milestone
+      await tx
+        .update(contractMilestones)
+        .set({
+          holdPaymentHash,
+          holdPreimage: encryptedPreimage,
+        })
+        .where(eq(contractMilestones.id, ms.id));
+
+      // Record payment event with 'held' status
+      await tx.insert(paymentEvents).values({
+        id: ulid(),
+        paymentHash: invoicePaymentHash || holdPaymentHash,
+        amountSats: ms.amountSats,
+        purpose: 'hold_lock',
+        status: 'held',
+        contractId,
+        milestoneId: ms.id,
+        nwcConnectionId,
+        metadata: { hold_payment_hash: holdPaymentHash },
+      });
+
+      milestoneInvoices.push({
+        milestoneId: ms.id,
+        bolt11: '', // Path B — no bolt11 to return since we charged directly
+        amountSats: ms.amountSats,
+      });
     }
 
     await tx
@@ -552,6 +619,8 @@ export async function fundContract(
       .set({
         nwcConnectionId,
         fundedSats: contract.totalSats,
+        status: 'active',
+        activatedAt: new Date(),
         updatedAt: new Date(),
       })
       .where(eq(contracts.id, contractId));
@@ -561,10 +630,17 @@ export async function fundContract(
       contractId,
       eventType: 'funded',
       actorPubkey: customerPubkey,
-      metadata: { funded_sats: contract.totalSats },
+      metadata: {
+        funded_sats: contract.totalSats,
+        milestones_funded: milestones.length,
+        path: 'B', // platform wallet relay
+      },
     });
 
-    return { funded_sats: contract.totalSats };
+    return {
+      funded_sats: contract.totalSats,
+      milestones: milestoneInvoices,
+    };
   });
 }
 
@@ -579,6 +655,7 @@ export async function submitMilestone(
   deliverableNotes?: string,
   evidence?: Record<string, string>,
   skillsUsed?: string[],
+  agentBolt11?: string,
 ) {
   return await db.transaction(async (tx) => {
     const [contract] = await tx
@@ -651,6 +728,7 @@ export async function submitMilestone(
         submittedAt: new Date(),
         ...(updatedIsc ? { iscCriteria: updatedIsc } : {}),
         ...(skillsUsed ? { skillsUsed } : {}),
+        ...(agentBolt11 ? { agentBolt11 } : {}),
       })
       .where(eq(contractMilestones.id, milestoneId));
 
@@ -678,7 +756,7 @@ export async function acceptMilestone(
   customerPubkey: string,
   iscOverrides?: Record<string, { status: 'passed' | 'failed'; note?: string }>,
 ) {
-  return await db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     const [contract] = await tx
       .select()
       .from(contracts)
@@ -767,14 +845,8 @@ export async function acceptMilestone(
       metadata: { milestone_id: milestoneId, amount_sats: milestone.amountSats },
     });
 
-    // Update contract paid amount
-    await tx
-      .update(contracts)
-      .set({
-        paidSats: sql`${contracts.paidSats} + ${milestone.amountSats}`,
-        updatedAt: new Date(),
-      })
-      .where(eq(contracts.id, contractId));
+    // S3 fix: paidSats is incremented in releaseMilestonePayment (the canonical payment event),
+    // NOT here. Acceptance is approval, not payment.
 
     // Check if all non-retention milestones are accepted
     const allMilestones = await tx
@@ -821,6 +893,7 @@ export async function acceptMilestone(
 
   // Factory onboarding hook — fires AFTER the transaction commits (FA-1 fix).
   // If the tx rolled back, we never reach here, preventing trust boosts on failed milestones.
+  // S10 fix: `result` is now captured from the transaction return (was missing `const result =`).
   if (result.contractCompleted && result.isFactoryContract) {
     const agentPub = result.agentPubkey;
     setImmediate(async () => {
@@ -834,6 +907,31 @@ export async function acceptMilestone(
         );
       }
     });
+  }
+
+  // Gateway Credits Launch Promo — grant bonus inference credits on contract completion.
+  // Separate from sats payout. Agent claims via GET /v1/credits/gateway.
+  // PROMO: Remove or disable after launch window closes.
+  if (result.contractCompleted) {
+    const agentPub = result.agentPubkey;
+    const PROMO_CREDITS_SATS = 25_000; // 25,000 sats of Gateway inference budget per completed contract
+    const PROMO_DEADLINE = new Date('2026-04-13T00:00:00Z'); // 1 month from launch
+
+    if (new Date() < PROMO_DEADLINE) {
+      setImmediate(async () => {
+        try {
+          const { payAgentGatewayCredits } = await import('./gateway-service');
+          await payAgentGatewayCredits(
+            agentPub,
+            PROMO_CREDITS_SATS,
+            `Launch promo: bonus inference credits for completing contract ${contractId}`,
+          );
+          console.log(`[promo] Granted ${PROMO_CREDITS_SATS} Gateway credits to ${agentPub.slice(0, 8)}... for contract ${contractId}`);
+        } catch (err) {
+          console.error(`[promo] Failed to grant Gateway credits to ${agentPub.slice(0, 8)}...:`, err instanceof Error ? err.message : err);
+        }
+      });
+    }
   }
 
   return {
@@ -898,11 +996,18 @@ export async function rejectMilestone(
 
 /**
  * Release payment for an accepted milestone.
- * Charges customer NWC → pays agent NWC. Records payment_event.
+ * Path B (platform wallet relay): Sats already at platform wallet from fundContract().
+ * 1. Mark funding payment as settled
+ * 2. Calculate 1% platform fee
+ * 3. Pay agent via Lightning (bolt11) or Gateway credits
+ * 4. Record everything in paymentEvents
  */
-export async function releaseMilestonePayment(contractId: string, milestoneId: string) {
-  // H1 fix: Wrap in transaction with FOR UPDATE to prevent double-payment race condition
-  const result = await db.transaction(async (tx) => {
+export async function releaseMilestonePayment(contractId: string, milestoneId: string, callerPubkey?: string) {
+  // S5 fix: 2-phase payment — DB intent inside transaction, Lightning payment outside.
+  // This prevents double-payment if Lightning succeeds but DB transaction rolls back.
+
+  // Phase 1: Record intent and calculate amounts (inside transaction, short-lived)
+  const intent = await db.transaction(async (tx) => {
     const [contract] = await tx
       .select()
       .from(contracts)
@@ -910,7 +1015,11 @@ export async function releaseMilestonePayment(contractId: string, milestoneId: s
       .for('update');
 
     if (!contract) throw new Error('Contract not found');
-    if (!contract.nwcConnectionId) throw new Error('Contract has no NWC connection');
+
+    // S4 fix: Defense-in-depth auth check
+    if (callerPubkey && callerPubkey !== contract.customerPubkey) {
+      throw new Error('Only the customer can release milestone payments');
+    }
 
     const [milestone] = await tx
       .select()
@@ -925,69 +1034,143 @@ export async function releaseMilestonePayment(contractId: string, milestoneId: s
 
     // Idempotency guard: already released = no-op
     if (milestone.status === 'released') {
-      return { paymentHash: milestone.paymentHash ?? 'already_released', amountSats: milestone.amountSats, alreadyReleased: true };
+      return { alreadyReleased: true, paymentHash: milestone.paymentHash ?? 'already_released', amountSats: milestone.amountSats } as const;
     }
 
     if (milestone.status !== 'accepted' && !(milestone.isRetention && milestone.status === 'pending')) {
       throw new Error(`Cannot release payment for milestone in status "${milestone.status}"`);
     }
 
-    const purpose = milestone.isRetention ? 'contract_retention' : 'contract_milestone';
-
-    try {
-      // Dynamic import to avoid circular deps (matching staking-service pattern)
-      const { executeSlash } = await import('./nwc-service');
-      const { paymentHash } = await executeSlash(
-        contract.nwcConnectionId,
-        milestone.amountSats,
-        `Contract ${contract.title}: ${milestone.title}`,
-      );
-
-      // Record payment event
-      await tx.insert(paymentEvents).values({
-        id: ulid(),
-        paymentHash,
-        amountSats: milestone.amountSats,
-        purpose: purpose as 'contract_milestone' | 'contract_retention',
-        status: 'paid',
-        contractId,
-        milestoneId,
-        nwcConnectionId: contract.nwcConnectionId,
-      });
-
-      // Mark milestone as released
+    // Mark the hold_lock payment as settled (Path B: sats already at platform wallet)
+    if (milestone.holdPaymentHash) {
       await tx
-        .update(contractMilestones)
-        .set({
-          status: 'released',
-          releasedAt: new Date(),
-          paymentHash,
-        })
-        .where(eq(contractMilestones.id, milestoneId));
-
-      await logEvent(contractId, 'milestone_released', contract.customerPubkey, {
-        milestone_id: milestoneId,
-        amount_sats: milestone.amountSats,
-        payment_hash: paymentHash,
-      });
-
-      return { paymentHash, amountSats: milestone.amountSats, alreadyReleased: false };
-    } catch (err) {
-      // Record failed payment
-      await tx.insert(paymentEvents).values({
-        id: ulid(),
-        paymentHash: `failed_${ulid()}`,
-        amountSats: milestone.amountSats,
-        purpose: purpose as 'contract_milestone' | 'contract_retention',
-        status: 'failed',
-        contractId,
-        milestoneId,
-        nwcConnectionId: contract.nwcConnectionId,
-        metadata: { error: err instanceof Error ? err.message : 'Unknown error' },
-      });
-      throw err;
+        .update(paymentEvents)
+        .set({ status: 'paid', updatedAt: new Date() })
+        .where(and(
+          eq(paymentEvents.contractId, contractId),
+          eq(paymentEvents.milestoneId, milestoneId),
+          eq(paymentEvents.purpose, 'hold_lock'),
+          eq(paymentEvents.status, 'held'),
+        ));
     }
+
+    const feeSats = Math.floor(milestone.amountSats / 100); // 1% activity fee
+    const netPayoutSats = milestone.amountSats - feeSats;
+    const payoutMethod = milestone.payoutMethod ?? 'lightning';
+
+    return {
+      alreadyReleased: false,
+      contractTitle: contract.title,
+      agentPubkey: contract.agentPubkey,
+      customerPubkey: contract.customerPubkey,
+      amountSats: milestone.amountSats,
+      milestoneTitle: milestone.title,
+      agentBolt11: milestone.agentBolt11,
+      payoutMethod,
+      feeSats,
+      netPayoutSats,
+      isRetention: milestone.isRetention,
+    } as const;
   });
+
+  if (intent.alreadyReleased) {
+    return { paymentHash: intent.paymentHash, amountSats: intent.amountSats };
+  }
+
+  // Phase 2: Execute payment OUTSIDE the transaction (no DB locks held)
+  let agentPaymentHash = '';
+  try {
+    if (intent.payoutMethod === 'gateway_credits') {
+      const { payAgentGatewayCredits } = await import('./gateway-service');
+      const creditResult = await payAgentGatewayCredits(
+        intent.agentPubkey,
+        intent.netPayoutSats,
+        `Contract "${intent.contractTitle}": ${intent.milestoneTitle}`,
+      );
+      // Store token so agent can retrieve it via contract events
+      agentPaymentHash = `gateway_credits_${creditResult.token.slice(0, 16)}_${ulid()}`;
+    } else {
+      if (intent.agentBolt11) {
+        const albyhub = await import('./albyhub-service');
+        const payment = await albyhub.payInvoice(intent.agentBolt11);
+        agentPaymentHash = payment.paymentHash || payment.preimage;
+      } else {
+        console.warn(`[contracts] No agent_bolt11 for milestone ${milestoneId} — sats held in platform wallet pending agent claim`);
+        agentPaymentHash = `pending_claim_${ulid()}`;
+      }
+    }
+  } catch (payErr) {
+    // Payment failed — record failure but don't mark milestone as released
+    await db.insert(paymentEvents).values({
+      id: ulid(),
+      paymentHash: `failed_${ulid()}`,
+      amountSats: intent.amountSats,
+      purpose: intent.isRetention ? 'contract_retention' : 'contract_milestone',
+      status: 'failed',
+      contractId,
+      milestoneId,
+      metadata: { error: payErr instanceof Error ? payErr.message : 'Unknown error' },
+    });
+    throw payErr;
+  }
+
+  // Phase 3: Record success (separate transaction — idempotent via status check)
+  await db.transaction(async (tx) => {
+    // Re-check milestone status to prevent race condition
+    const [ms] = await tx
+      .select()
+      .from(contractMilestones)
+      .where(eq(contractMilestones.id, milestoneId))
+      .for('update');
+
+    if (!ms || ms.status === 'released') return; // Already released by concurrent call
+
+    await tx.insert(paymentEvents).values({
+      id: ulid(),
+      paymentHash: agentPaymentHash,
+      amountSats: intent.netPayoutSats,
+      purpose: 'agent_payout',
+      status: agentPaymentHash.startsWith('pending_claim_') ? 'pending' : 'paid',
+      contractId,
+      milestoneId,
+      metadata: {
+        fee_sats: intent.feeSats,
+        gross_amount_sats: intent.amountSats,
+        payout_method: intent.payoutMethod,
+      },
+    });
+
+    await tx
+      .update(contractMilestones)
+      .set({
+        status: 'released',
+        releasedAt: new Date(),
+        paymentHash: agentPaymentHash,
+        agentPaymentHash,
+        feeSats: intent.feeSats,
+        netPayoutSats: intent.netPayoutSats,
+      })
+      .where(eq(contractMilestones.id, milestoneId));
+
+    await tx
+      .update(contracts)
+      .set({
+        paidSats: sql`${contracts.paidSats} + ${intent.amountSats}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(contracts.id, contractId));
+
+    await logEvent(contractId, 'milestone_released', intent.customerPubkey, {
+      milestone_id: milestoneId,
+      amount_sats: intent.amountSats,
+      fee_sats: intent.feeSats,
+      net_payout_sats: intent.netPayoutSats,
+      payout_method: intent.payoutMethod,
+      payment_hash: agentPaymentHash,
+    });
+  });
+
+  const result = { paymentHash: agentPaymentHash, amountSats: intent.amountSats, alreadyReleased: false };
 
   // Trigger royalty payments outside the transaction (non-blocking, matching existing pattern)
   if (!result.alreadyReleased) {
@@ -1372,12 +1555,13 @@ export async function cancelContract(
   actorPubkey: string,
   reason: string,
 ) {
-  return await db.transaction(async (tx) => {
+  // S8 fix: Cancel in a short transaction, then refund outside it (no long DB locks during Lightning).
+  const refundInfo = await db.transaction(async (tx) => {
     const [contract] = await tx
       .select()
       .from(contracts)
       .where(eq(contracts.id, contractId))
-      .limit(1);
+      .for('update');
 
     if (!contract) throw new Error('Contract not found');
 
@@ -1386,9 +1570,26 @@ export async function cancelContract(
       throw new Error('Only contract parties can cancel');
     }
 
-    const cancellableStatuses = ['draft', 'awaiting_funding'];
+    // Allow cancellation of draft, awaiting_funding, and active (with refunds)
+    const cancellableStatuses = ['draft', 'awaiting_funding', 'active'];
     if (!cancellableStatuses.includes(contract.status)) {
-      throw new Error(`Cannot cancel contract in status "${contract.status}". Only draft or awaiting_funding contracts can be cancelled.`);
+      throw new Error(`Cannot cancel contract in status "${contract.status}". Only draft, awaiting_funding, or active contracts can be cancelled.`);
+    }
+
+    // Collect refund intents for funded milestones
+    let refunds: Array<{ milestoneId: string; amountSats: number }> = [];
+    let nwcConnectionId: string | null = null;
+
+    if (contract.status === 'active' && contract.nwcConnectionId) {
+      nwcConnectionId = contract.nwcConnectionId;
+      const milestones = await tx
+        .select()
+        .from(contractMilestones)
+        .where(eq(contractMilestones.contractId, contractId));
+
+      refunds = milestones
+        .filter((ms) => ms.status !== 'released' && ms.holdPaymentHash)
+        .map((ms) => ({ milestoneId: ms.id, amountSats: ms.amountSats }));
     }
 
     await tx
@@ -1405,11 +1606,51 @@ export async function cancelContract(
       contractId,
       eventType: 'cancelled',
       actorPubkey,
-      metadata: { reason },
+      metadata: { reason, pending_refunds: refunds.length },
     });
 
-    return { cancelled: true };
+    return { refunds, nwcConnectionId };
   });
+
+  // Process refunds OUTSIDE the transaction (no DB locks held during Lightning round-trips)
+  if (refundInfo.refunds.length > 0 && refundInfo.nwcConnectionId) {
+    const { payYield } = await import('./nwc-service');
+    const connId = refundInfo.nwcConnectionId;
+
+    // Fire-and-forget: don't block the cancel response on refund completion
+    setImmediate(async () => {
+      for (const refund of refundInfo.refunds) {
+        try {
+          const { paymentHash } = await payYield(connId, refund.amountSats);
+          await db.insert(paymentEvents).values({
+            id: ulid(),
+            paymentHash: paymentHash || `refund_${ulid()}`,
+            amountSats: refund.amountSats,
+            purpose: 'contract_refund',
+            status: 'paid',
+            contractId,
+            milestoneId: refund.milestoneId,
+            nwcConnectionId: connId,
+            metadata: { reason: 'contract_cancelled' },
+          });
+        } catch (refundErr) {
+          console.error(`[contracts] Refund failed for milestone ${refund.milestoneId}:`, refundErr instanceof Error ? refundErr.message : refundErr);
+          await db.insert(paymentEvents).values({
+            id: ulid(),
+            paymentHash: `refund_failed_${ulid()}`,
+            amountSats: refund.amountSats,
+            purpose: 'contract_refund',
+            status: 'failed',
+            contractId,
+            milestoneId: refund.milestoneId,
+            metadata: { error: refundErr instanceof Error ? refundErr.message : 'Unknown error' },
+          });
+        }
+      }
+    });
+  }
+
+  return { cancelled: true };
 }
 
 /**
@@ -1589,6 +1830,7 @@ export async function submitBid(
   approach: string,
   costSats: number,
   estimatedDays: number,
+  payoutPreference: string = 'lightning',
 ) {
   if (!approach || approach.trim().length === 0) {
     throw new Error('approach is required');
@@ -1675,6 +1917,7 @@ export async function submitBid(
         costSats,
         estimatedDays,
         bidderTrustScore,
+        payoutPreference,
       })
       .returning();
 
@@ -1786,6 +2029,33 @@ export async function acceptBid(
         updatedAt: new Date(),
       })
       .where(eq(contracts.id, contractId));
+
+    // Recalculate milestone amounts when bid cost differs from original totalSats
+    if (bid.costSats !== contract.totalSats) {
+      const milestones = await tx
+        .select()
+        .from(contractMilestones)
+        .where(eq(contractMilestones.contractId, contractId));
+
+      for (const ms of milestones) {
+        const newAmount = Math.floor((bid.costSats * ms.percentageBps) / 10000);
+        await tx
+          .update(contractMilestones)
+          .set({
+            amountSats: newAmount,
+            payoutMethod: (bid as Record<string, unknown>).payoutPreference as string ?? 'lightning',
+          })
+          .where(eq(contractMilestones.id, ms.id));
+      }
+    } else {
+      // Even if cost matches, propagate payout preference
+      await tx
+        .update(contractMilestones)
+        .set({
+          payoutMethod: (bid as Record<string, unknown>).payoutPreference as string ?? 'lightning',
+        })
+        .where(eq(contractMilestones.contractId, contractId));
+    }
 
     console.log(`[contracts] Bid accepted: ${bid.bidderPubkey} assigned to contract ${contractId} for ${bid.costSats} sats`);
     return { contractId, bidId, agentPubkey: bid.bidderPubkey, costSats: bid.costSats };

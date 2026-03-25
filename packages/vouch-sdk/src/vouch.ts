@@ -122,6 +122,125 @@ function scoreTier(score: number): TrustResult['tier'] {
   return 'unranked';
 }
 
+// ── Static Trust Check (Zero-Config) ──
+
+const DEFAULT_API = 'https://percivalvouch-api-production.up.railway.app';
+
+/**
+ * Check an agent's trust score. No identity required.
+ * This is the "7 lines of code" entry point.
+ *
+ * @example
+ * ```ts
+ * import { trust } from '@percival-labs/vouch-sdk';
+ *
+ * // Binary check: is this agent trusted?
+ * const ok = await trust.check('npub1...', { min: 600 });
+ *
+ * // Full score lookup
+ * const score = await trust.score('npub1...');
+ * console.log(score.composite, score.dimensions);
+ * ```
+ */
+export const trust = {
+  /**
+   * Binary trust check. Returns true if the agent's composite score >= min.
+   * Zero-config — no keys, no setup, one line.
+   */
+  async check(npub: string, opts: { min?: number; domain?: string; apiUrl?: string } = {}): Promise<boolean> {
+    const threshold = opts.min ?? 400;
+    const score = await trust.score(npub, { apiUrl: opts.apiUrl });
+    return score.composite >= threshold;
+  },
+
+  /**
+   * Get full trust score for any agent by npub. No auth required.
+   */
+  async score(npub: string, opts: { apiUrl?: string } = {}): Promise<{
+    composite: number;
+    tier: string;
+    dimensions: Record<string, number>;
+    backed: boolean;
+    confidence: number;
+  }> {
+    if (!npub || typeof npub !== 'string') {
+      throw new Error('npub is required and must be a string');
+    }
+    const api = opts.apiUrl ?? DEFAULT_API;
+    let hexPubkey: string;
+    try {
+      hexPubkey = npubToHex(npub);
+    } catch {
+      throw new Error(`Invalid npub format: ${npub.slice(0, 20)}...`);
+    }
+    // Validate hex is actually hex (prevents path injection)
+    if (!/^[0-9a-f]{64}$/i.test(hexPubkey)) {
+      throw new Error('npub decoded to invalid public key');
+    }
+    const res = await fetch(`${api}/v1/sdk/agents/${hexPubkey}/score`);
+
+    if (!res.ok) {
+      if (res.status === 404) {
+        return { composite: 0, tier: 'unranked', dimensions: {}, backed: false, confidence: 0 };
+      }
+      throw new Error(`Vouch API error ${res.status}`);
+    }
+
+    const json = await res.json() as { data: {
+      score: number;
+      dimensions: Record<string, number>;
+      backed: boolean;
+      pool_sats: number;
+      staker_count: number;
+      performance: { success_rate: number; total_outcomes: number };
+    }};
+    const d = json.data;
+    const evidenceCount = d.performance.total_outcomes;
+
+    return {
+      composite: d.score,
+      tier: d.score >= 850 ? 'diamond' : d.score >= 700 ? 'gold' : d.score >= 400 ? 'silver' : d.score >= 200 ? 'bronze' : 'unranked',
+      dimensions: d.dimensions,
+      backed: d.backed,
+      confidence: Math.min(1, evidenceCount / 50), // confidence ramps to 1.0 at 50 outcomes
+    };
+  },
+};
+
+/**
+ * Trust gate middleware. Drop this into any request handler to gate on trust.
+ *
+ * @example
+ * ```ts
+ * import { trustGate } from '@percival-labs/vouch-sdk';
+ *
+ * // Gate an API endpoint
+ * const gate = trustGate({ min: 600 });
+ * const result = await gate(request.headers.get('x-agent-npub'));
+ * if (!result.ok) return new Response('Untrusted', { status: 403 });
+ * ```
+ */
+export function trustGate(opts: { min?: number; domain?: string; apiUrl?: string } = {}) {
+  const threshold = opts.min ?? 400;
+
+  return async (npub: string | null | undefined): Promise<{ ok: boolean; score: number; tier: string; reason?: string }> => {
+    if (!npub) {
+      return { ok: false, score: 0, tier: 'unranked', reason: 'no agent identity provided' };
+    }
+
+    try {
+      const result = await trust.score(npub, { apiUrl: opts.apiUrl });
+      if (result.composite >= threshold) {
+        return { ok: true, score: result.composite, tier: result.tier };
+      }
+      return { ok: false, score: result.composite, tier: result.tier, reason: `score ${result.composite} below threshold ${threshold}` };
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false, score: 0, tier: 'unranked', reason: `trust check failed: ${msg}` };
+    }
+  };
+}
+
 // ── Main Class ──
 
 export class Vouch {
@@ -144,7 +263,7 @@ export class Vouch {
     }
 
     this.relay = opts.relay ?? 'wss://relay.vouch.xyz';
-    this.apiUrl = opts.apiUrl ?? 'https://percivalvouch-api-production.up.railway.app';
+    this.apiUrl = opts.apiUrl ?? DEFAULT_API;
   }
 
   /** The agent's npub (bech32 Nostr public key) */

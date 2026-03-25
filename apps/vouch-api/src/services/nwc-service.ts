@@ -4,45 +4,10 @@
 // On slash: platform creates invoice → charges user via NWC pay_invoice.
 // On yield: platform sends make_invoice via NWC → user wallet creates invoice → platform pays.
 
-import { eq, and } from 'drizzle-orm';
+import { eq, and, sql } from 'drizzle-orm';
 import { db, nwcConnections } from '@percival/vouch-db';
 import { createInvoice, payInvoice } from './albyhub-service';
-
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '';
-
-// ── Encryption (AES-256-GCM for NWC connection strings at rest) ──
-
-async function getEncryptionKey(): Promise<CryptoKey> {
-  if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 64) {
-    throw new Error('ENCRYPTION_KEY must be a 64-char hex string (32 bytes)');
-  }
-  const keyBytes = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) {
-    keyBytes[i] = parseInt(ENCRYPTION_KEY.slice(i * 2, i * 2 + 2), 16);
-  }
-  return crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
-}
-
-async function encrypt(plaintext: string): Promise<string> {
-  const key = await getEncryptionKey();
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encoded = new TextEncoder().encode(plaintext);
-  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
-  // Format: base64(iv + ciphertext)
-  const combined = new Uint8Array(iv.length + ciphertext.byteLength);
-  combined.set(iv, 0);
-  combined.set(new Uint8Array(ciphertext), iv.length);
-  return Buffer.from(combined).toString('base64');
-}
-
-async function decrypt(encryptedBase64: string): Promise<string> {
-  const key = await getEncryptionKey();
-  const combined = Buffer.from(encryptedBase64, 'base64');
-  const iv = combined.subarray(0, 12);
-  const ciphertext = combined.subarray(12);
-  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
-  return new TextDecoder().decode(plaintext);
-}
+import { encrypt, decrypt } from '../lib/encryption';
 
 // ── NWC Protocol (NIP-47 via nostr: URI) ──
 
@@ -210,42 +175,50 @@ export async function executeSlash(
   amountSats: number,
   reason: string,
 ): Promise<{ paymentHash: string; preimage: string }> {
-  const [conn] = await db
-    .select()
-    .from(nwcConnections)
-    .where(and(eq(nwcConnections.id, connectionId), eq(nwcConnections.status, 'active')))
-    .limit(1);
-
-  if (!conn) throw new Error('NWC connection not found or inactive');
-
-  const remaining = conn.budgetSats - conn.spentSats;
-  if (amountSats > remaining) {
-    throw new Error(`Slash amount ${amountSats} exceeds remaining budget ${remaining} sats`);
-  }
-
-  // Step 1: Platform creates invoice to receive the slash payment
-  const invoice = await createInvoice(amountSats, `Vouch slash: ${reason}`);
-
-  // Step 2: Send pay_invoice to user's wallet via NWC
-  const decrypted = await decrypt(conn.connectionString);
-  const result = await nwcRequest(decrypted, 'pay_invoice', {
-    invoice: invoice.paymentRequest,
-  }) as { preimage?: string };
-
-  // Step 3: Update spent amount
-  await db
+  // S2 fix: Atomic budget reservation BEFORE the Lightning payment.
+  // Uses SQL-level WHERE to prevent concurrent calls from double-spending.
+  const [reserved] = await db
     .update(nwcConnections)
     .set({
-      spentSats: conn.spentSats + amountSats,
+      spentSats: sql`${nwcConnections.spentSats} + ${amountSats}`,
     })
-    .where(eq(nwcConnections.id, connectionId));
+    .where(and(
+      eq(nwcConnections.id, connectionId),
+      eq(nwcConnections.status, 'active'),
+      sql`${nwcConnections.budgetSats} - ${nwcConnections.spentSats} >= ${amountSats}`,
+    ))
+    .returning();
 
-  console.log(`[nwc] Slash executed: ${amountSats} sats charged from ${conn.userNpub} for "${reason}"`);
+  if (!reserved) {
+    throw new Error('Insufficient NWC budget or connection inactive');
+  }
 
-  return {
-    paymentHash: invoice.paymentHash,
-    preimage: result.preimage || '',
-  };
+  try {
+    // Step 1: Platform creates invoice to receive the slash payment
+    const invoice = await createInvoice(amountSats, `Vouch slash: ${reason}`);
+
+    // Step 2: Send pay_invoice to user's wallet via NWC
+    const decrypted = await decrypt(reserved.connectionString);
+    const result = await nwcRequest(decrypted, 'pay_invoice', {
+      invoice: invoice.paymentRequest,
+    }) as { preimage?: string };
+
+    console.log(`[nwc] Slash executed: ${amountSats} sats charged from ${reserved.userNpub} for "${reason}"`);
+
+    return {
+      paymentHash: invoice.paymentHash,
+      preimage: result.preimage || '',
+    };
+  } catch (err) {
+    // Rollback the budget reservation on Lightning payment failure
+    await db
+      .update(nwcConnections)
+      .set({
+        spentSats: sql`${nwcConnections.spentSats} - ${amountSats}`,
+      })
+      .where(eq(nwcConnections.id, connectionId));
+    throw err;
+  }
 }
 
 /**

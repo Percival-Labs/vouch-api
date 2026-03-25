@@ -110,7 +110,7 @@ describe('Vouch Class', () => {
   test('defaults to vouch.xyz relay and API', () => {
     const vouch = new Vouch();
     expect(vouch.relay).toBe('wss://relay.vouch.xyz');
-    expect(vouch.apiUrl).toBe('https://api.vouch.xyz');
+    expect(vouch.apiUrl).toBe('https://percivalvouch-api-production.up.railway.app');
   });
 
   test('accepts custom API URL', () => {

@@ -5,7 +5,7 @@ import { Hono } from 'hono';
 import { db, usageRecords } from '@percival/vouch-db';
 import { eq, desc, and, gte } from 'drizzle-orm';
 import { success, paginated, error } from '../lib/response';
-import { validate, CreditDepositSchema, CreditBatchSchema } from '../lib/schemas';
+import { validate, CreditDepositSchema, CreditBatchSchema, CreditLimitsSchema, CreditDepositConfirmSchema } from '../lib/schemas';
 import type { NostrAuthEnv } from '../middleware/nostr-auth';
 import {
   getBalance,
@@ -84,12 +84,13 @@ app.post('/deposit/confirm', async (c) => {
   if (!npub) return error(c, 401, 'AUTH_REQUIRED', 'NIP-98 authorization required');
 
   try {
-    const body = await c.req.json<{ deposit_id: string }>();
-    if (!body.deposit_id) {
-      return error(c, 400, 'VALIDATION_ERROR', 'deposit_id is required');
+    const raw = await c.req.json();
+    const parsed = validate(CreditDepositConfirmSchema, raw);
+    if (!parsed.success) {
+      return error(c, 400, parsed.error.code, parsed.error.message, parsed.error.details);
     }
 
-    const balance = await confirmDeposit(body.deposit_id, npub);
+    const balance = await confirmDeposit(parsed.data.deposit_id, npub);
 
     return success(c, {
       balance_sats: balance.balanceSats,
@@ -111,16 +112,15 @@ app.post('/limits', async (c) => {
   if (!npub) return error(c, 401, 'AUTH_REQUIRED', 'NIP-98 authorization required');
 
   try {
-    const body = await c.req.json<{
-      daily_limit_sats?: number | null;
-      weekly_limit_sats?: number | null;
-      monthly_limit_sats?: number | null;
-    }>();
+    const raw = await c.req.json();
+    const parsed = validate(CreditLimitsSchema, raw);
+    if (!parsed.success) {
+      return error(c, 400, parsed.error.code, parsed.error.message, parsed.error.details);
+    }
+    const body = parsed.data;
 
     const balance = await setLimits(npub, {
       dailyLimitSats: body.daily_limit_sats,
-      weeklyLimitSats: body.weekly_limit_sats,
-      monthlyLimitSats: body.monthly_limit_sats,
     });
 
     return success(c, {
@@ -253,6 +253,34 @@ app.get('/usage/summary', async (c) => {
   } catch (err) {
     console.error('[credits] GET /usage/summary error:', err);
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to get usage summary');
+  }
+});
+
+// ── GET /gateway — Retrieve agent's Gateway credentials ──
+// Returns the AgentKey token + gateway URL so agents can run inference.
+// Agent must have Gateway credits (earned via contract milestone payouts).
+app.get('/gateway', async (c) => {
+  const npub = c.get('nostrPubkey');
+  if (!npub) return error(c, 401, 'AUTH_REQUIRED', 'NIP-98 authorization required');
+
+  try {
+    const { getAgentGatewayCredentials } = await import('../services/gateway-service');
+    const creds = await getAgentGatewayCredentials(npub);
+
+    if (!creds) {
+      return error(c, 404, 'NO_GATEWAY_KEY', 'No Gateway credentials found. Earn credits by completing contract milestones with payout_method: gateway_credits.');
+    }
+
+    return success(c, {
+      gateway_url: creds.gatewayUrl,
+      agent_key: creds.token,
+      auth_header: `AgentKey ${creds.token}`,
+      budget: creds.budget,
+      usage_hint: `curl ${creds.gatewayUrl}/auto/v1/chat/completions -H "X-Vouch-Auth: AgentKey ${creds.token}" -H "Content-Type: application/json" -d '{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"Hello"}]}'`,
+    });
+  } catch (err) {
+    console.error('[credits] GET /gateway error:', err);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to retrieve Gateway credentials');
   }
 });
 

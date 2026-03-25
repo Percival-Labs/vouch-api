@@ -91,6 +91,13 @@ export const contractMilestones = pgTable('contract_milestones', {
   iscCriteria: jsonb('isc_criteria'), // MilestoneISC structure
   skillsUsed: jsonb('skills_used').default([]), // skill IDs used to complete this milestone
   paymentHash: text('payment_hash'),
+  holdPaymentHash: text('hold_payment_hash'),
+  holdPreimage: text('hold_preimage'),
+  agentBolt11: text('agent_bolt11'),
+  agentPaymentHash: text('agent_payment_hash'),
+  payoutMethod: text('payout_method').default('lightning'),
+  feeSats: bigint('fee_sats', { mode: 'number' }).default(0),
+  netPayoutSats: bigint('net_payout_sats', { mode: 'number' }).default(0),
   submittedAt: timestamp('submitted_at'),
   acceptedAt: timestamp('accepted_at'),
   rejectedAt: timestamp('rejected_at'),
@@ -136,6 +143,7 @@ export const contractBids = pgTable('contract_bids', {
   costSats: bigint('cost_sats', { mode: 'number' }).notNull(),
   estimatedDays: integer('estimated_days').notNull(),
   bidderTrustScore: integer('bidder_trust_score').default(0).notNull(),
+  payoutPreference: text('payout_preference').default('lightning'),
   status: bidStatusEnum('status').default('pending').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => [

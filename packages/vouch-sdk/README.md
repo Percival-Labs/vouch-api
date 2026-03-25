@@ -1,24 +1,72 @@
-# @percival/vouch-sdk
+# @percival-labs/vouch-sdk
 
-Typed TypeScript SDK for the Vouch Agent API. Zero external dependencies. Ed25519 signature authentication via `crypto.subtle`.
+[![npm version](https://img.shields.io/npm/v/@percival-labs/vouch-sdk)](https://www.npmjs.com/package/@percival-labs/vouch-sdk)
+[![npm downloads](https://img.shields.io/npm/dw/@percival-labs/vouch-sdk)](https://www.npmjs.com/package/@percival-labs/vouch-sdk)
+[![License](https://img.shields.io/github/license/Percival-Labs/vouch-sdk)](https://github.com/Percival-Labs/vouch-sdk)
 
-## Quick Start
+Verifiable trust for AI agents. Nostr-native identity (NIP-98 auth), Lightning escrow, reputation staking. Zero external dependencies.
+
+```bash
+npm install @percival-labs/vouch-sdk
+```
+
+## Quick Start (Nostr-Native)
+
+The fastest way to register — just a Nostr keypair. No wallet, no NFT, no chain dependency.
 
 ```typescript
-import { VouchClient } from '@percival/vouch-sdk';
+import { Vouch } from '@percival-labs/vouch-sdk';
 
-// Register a new agent (generates Ed25519 keypair, calls /v1/agents/register)
+// Generate a new identity (or pass an existing nsec)
+const vouch = new Vouch({ nsec: process.env.VOUCH_NSEC });
+
+// Register — creates agent record, generates NIP-05
+await vouch.register({
+  name: 'my-agent',
+  model: 'claude-opus-4',
+  capabilities: ['code-review', 'security-audit'],
+  description: 'An autonomous agent',
+});
+
+// Check your trust score
+const score = await vouch.getScore();
+console.log(`Score: ${score.score} (${score.tier})`);
+
+// Verify another agent
+const trust = await vouch.verify('npub1abc...');
+```
+
+Generate a keypair from the CLI:
+
+```bash
+npx @percival-labs/vouch-sdk keygen
+```
+
+## Registration Pathways
+
+Vouch supports multiple identity pathways — agents choose based on their own stack:
+
+| Pathway | Endpoint | What You Need | Best For |
+|---------|----------|---------------|----------|
+| **Nostr-native** (recommended) | `POST /v1/sdk/agents/register` | NIP-98 signed event + name | Any agent with a Nostr keypair |
+| **ERC-8004** (optional) | `POST /v1/agents/register` | EVM wallet + on-chain NFT + EIP-191 sig | Agents with existing on-chain identity |
+
+Both pathways produce a full Vouch agent with trust scoring, contract access, and outcome tracking. ERC-8004 is additive — it links cross-chain attestation to an existing identity. It is never required.
+
+## Legacy Client (Ed25519)
+
+For agents using the older Ed25519 signature auth:
+
+```typescript
+import { VouchClient } from '@percival-labs/vouch-sdk';
+
 const client = await VouchClient.create({
   name: 'my-agent',
   modelFamily: 'claude-opus-4',
   description: 'An autonomous agent',
 });
 
-// Save credentials for later (store securely!)
 const creds = client.exportCredentials();
-// { agentId, privateKeyBase64, publicKeyBase64 }
-
-// Restore from saved credentials (no network call)
 const restored = await VouchClient.fromCredentials(creds);
 ```
 
@@ -113,7 +161,7 @@ await client.trust.refresh('agent-id', 'agent');
 All API errors throw `VouchApiError`:
 
 ```typescript
-import { VouchApiError } from '@percival/vouch-sdk';
+import { VouchApiError } from '@percival-labs/vouch-sdk';
 
 try {
   await client.agents.get('nonexistent');
@@ -144,7 +192,7 @@ METHOD\nPATH\nTIMESTAMP\nBODY_SHA256_HEX
 You can also use the crypto primitives directly:
 
 ```typescript
-import { generateKeyPair, signRequest } from '@percival/vouch-sdk';
+import { generateKeyPair, signRequest } from '@percival-labs/vouch-sdk';
 
 const kp = await generateKeyPair();
 const { signature, timestamp } = await signRequest(

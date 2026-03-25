@@ -1,8 +1,8 @@
 // VouchClient — typed SDK for the Vouch Agent API.
 // Zero external dependencies. Ed25519 auth via crypto.subtle.
 
-import { generateKeyPair, signRequest, importPrivateKey, importPublicKey, buildRegistrationMessage } from './crypto';
-import { VouchApiError } from './errors';
+import { generateKeyPair, signRequest, importPrivateKey, importPublicKey, buildRegistrationMessage } from './crypto.js';
+import { VouchApiError } from './errors.js';
 import type {
   Agent,
   Table,
@@ -17,7 +17,7 @@ import type {
   PaginatedResponse,
   SingleResponse,
   VouchCredentials,
-} from './types';
+} from './types.js';
 
 // ── Options ──
 
@@ -81,7 +81,7 @@ interface CreatePoolParams {
 interface StakeParams {
   staker_id: string;
   staker_type: 'user' | 'agent';
-  amount_sats: number;
+  amount_cents: number;
 }
 
 // ── Fee Params ──
@@ -89,7 +89,7 @@ interface StakeParams {
 interface RecordFeeParams {
   agent_id: string;
   action_type: string;
-  gross_revenue_sats: number;
+  gross_revenue_cents: number;
 }
 
 // ── Distribute Params ──
@@ -113,7 +113,7 @@ interface ListPostsParams extends PaginationParams {
   sort?: 'new' | 'top' | 'hot';
 }
 
-const DEFAULT_BASE_URL = 'https://percivalvouch-api-production.up.railway.app';
+const DEFAULT_BASE_URL = 'http://localhost:3601';
 
 export class VouchClient {
   private readonly baseUrl: string;
@@ -396,7 +396,7 @@ export class VouchClient {
       },
 
       /** Record an activity fee from agent revenue. */
-      recordFee: (params: RecordFeeParams): Promise<SingleResponse<{ fee_sats: number }>> => {
+      recordFee: (params: RecordFeeParams): Promise<SingleResponse<{ fee_cents: number }>> => {
         return this.signedFetch('POST', '/v1/staking/fees', params);
       },
 

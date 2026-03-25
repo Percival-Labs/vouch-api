@@ -193,6 +193,9 @@ app.post('/wallet/connect', async (c) => {
     if (!budget_sats || typeof budget_sats !== 'number' || budget_sats < 1) {
       return error(c, 400, 'VALIDATION_ERROR', 'budget_sats must be a positive number');
     }
+    if (budget_sats > 100_000_000) {
+      return error(c, 400, 'VALIDATION_ERROR', 'Budget cannot exceed 100,000,000 sats');
+    }
 
     // Verify the pending stake exists and belongs to this user
     const [stakeRecord] = await db.select({ stakerId: stakes.stakerId, status: stakes.status }).from(stakes).where(eq(stakes.id, stake_id)).limit(1);
@@ -226,7 +229,25 @@ app.post('/wallet/connect', async (c) => {
 /** GET /stakes/:id/status — Get stake status (for polling during NWC connection flow) */
 app.get('/stakes/:id/status', async (c) => {
   try {
+    const callerId = c.get('verifiedAgentId');
+    const userId = c.get('userId' as never) as string | undefined;
+    const authenticatedId = callerId || userId;
+
+    if (!authenticatedId) {
+      return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
+    }
+
     const stakeId = c.req.param('id');
+
+    // R10 fix: verify caller owns the stake
+    const [ownerCheck] = await db.select({ stakerId: stakes.stakerId }).from(stakes).where(eq(stakes.id, stakeId)).limit(1);
+    if (!ownerCheck) {
+      return error(c, 404, 'NOT_FOUND', 'Stake not found');
+    }
+    if (ownerCheck.stakerId !== authenticatedId) {
+      return error(c, 403, 'FORBIDDEN', 'Can only view your own stake status');
+    }
+
     const stakeRecord = await getStakeStatus(stakeId);
     if (!stakeRecord) {
       return error(c, 404, 'NOT_FOUND', 'Stake not found');
@@ -312,7 +333,18 @@ app.post('/stakes/:id/withdraw', async (c) => {
 /** GET /stakers/:id/positions — Get all staking positions for a staker */
 app.get('/stakers/:id/positions', async (c) => {
   try {
+    const callerId = c.get('verifiedAgentId');
+    const userId = c.get('userId' as never) as string | undefined;
+    const authenticatedId = callerId || userId;
     const stakerId = c.req.param('id');
+
+    if (!authenticatedId) {
+      return error(c, 401, 'AUTH_REQUIRED', 'Authentication required');
+    }
+    if (authenticatedId !== stakerId) {
+      return error(c, 403, 'FORBIDDEN', 'Can only view your own positions');
+    }
+
     const stakerType = (c.req.query('type') || 'user') as 'user' | 'agent';
     const positions = await getStakerPositions(stakerId, stakerType);
     return success(c, positions);

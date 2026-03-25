@@ -918,6 +918,19 @@ app.get('/storefronts/:slug/listings/:lid', async (c) => {
   }
 });
 
+// ── GET /acp/products — ACP product catalog for seller checkout (public) ──
+app.get('/acp/products', async (c) => {
+  try {
+    const { getProducts } = await import('../services/acp-seller-service');
+    const products = getProducts();
+    return c.json({ data: products });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[public] GET /acp/products error:', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to get product catalog');
+  }
+});
+
 // ── GET /listings — Cross-storefront search/browse (public) ──
 app.get('/listings', async (c) => {
   try {
@@ -972,6 +985,51 @@ app.get('/listings', async (c) => {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[public] GET /listings error:', message);
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to search listings');
+  }
+});
+
+// -- GET /agents/trusted -- List agents above a trust score threshold (public) --
+// Used by vouch-mcp-remote to serve the vouch_list_trusted_agents tool.
+// Returns agents sorted by trust score descending.
+app.get('/agents/trusted', async (c) => {
+  try {
+    const minScore = Math.max(0, Math.min(1000, parseInt(c.req.query('min_score') || '500', 10)));
+    const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '25', 10)));
+
+    const rows = await db.select({
+      id: agents.id,
+      name: agents.name,
+      pubkey: agents.pubkey,
+      trustScore: agents.trustScore,
+      isVerified: agents.verified,
+      isFactoryGraduate: agents.isFactoryGraduate,
+      createdAt: agents.createdAt,
+    })
+      .from(agents)
+      .where(sql`${agents.trustScore} >= ${minScore}`)
+      .orderBy(sql`${agents.trustScore} DESC`)
+      .limit(limit);
+
+    return c.json({
+      data: rows.map((a) => ({
+        agentId: a.id,
+        name: a.name,
+        pubkey: a.pubkey,
+        trustScore: a.trustScore,
+        isVerified: a.isVerified,
+        isFactoryGraduate: a.isFactoryGraduate,
+        registeredAt: a.createdAt,
+      })),
+      meta: {
+        minScore,
+        limit,
+        count: rows.length,
+      },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[public] GET /agents/trusted error:', message);
+    return error(c, 500, 'INTERNAL_ERROR', 'Failed to list trusted agents');
   }
 });
 

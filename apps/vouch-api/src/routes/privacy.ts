@@ -4,6 +4,7 @@
 
 import { Hono } from 'hono';
 import { success, error } from '../lib/response';
+import { validate, IssueTokensSchema } from '../lib/schemas';
 import type { NostrAuthEnv } from '../middleware/nostr-auth';
 import { getIssuerPublicKey, issueTokenBatch } from '../services/privacy-service';
 
@@ -30,14 +31,12 @@ app.post('/tokens/issue', async (c) => {
   if (!pubkey) return error(c, 401, 'AUTH_REQUIRED', 'NIP-98 authorization required');
 
   try {
-    const body = await c.req.json<{
-      batch_hash: string;
-      blinded_tokens: string[];  // base64-encoded blinded token requests
-    }>();
-
-    if (!body.batch_hash || !body.blinded_tokens?.length) {
-      return error(c, 400, 'VALIDATION_ERROR', 'batch_hash and blinded_tokens[] are required');
+    const raw = await c.req.json();
+    const parsed = validate(IssueTokensSchema, raw);
+    if (!parsed.success) {
+      return error(c, 400, parsed.error.code, parsed.error.message, parsed.error.details);
     }
+    const body = parsed.data;
 
     // Decode base64 blinded tokens
     const blindedTokens = body.blinded_tokens.map(b64 => {

@@ -63,7 +63,7 @@ describe('crypto', () => {
       const path = '/v1/tables/general/posts';
       const body = JSON.stringify({ title: 'Hello', body: 'World' });
 
-      const { signature, timestamp } = await signRequest(kp.privateKey, method, path, body);
+      const { signature, timestamp, nonce } = await signRequest(kp.privateKey, method, path, body);
 
       // Reconstruct canonical request (same logic the server uses)
       const bodyHashBuffer = await crypto.subtle.digest(
@@ -71,7 +71,7 @@ describe('crypto', () => {
         new TextEncoder().encode(body),
       );
       const bodyHash = Buffer.from(bodyHashBuffer).toString('hex');
-      const canonical = `${method}\n${path}\n${timestamp}\n${bodyHash}`;
+      const canonical = `${method}\n${path}\n${timestamp}\n${nonce}\n${bodyHash}`;
       const canonicalBytes = new TextEncoder().encode(canonical);
       const signatureBytes = Buffer.from(signature, 'base64');
 
@@ -90,10 +90,10 @@ describe('crypto', () => {
       const method = 'GET';
       const path = '/v1/agents';
 
-      const { signature, timestamp } = await signRequest(kp.privateKey, method, path);
+      const { signature, timestamp, nonce } = await signRequest(kp.privateKey, method, path);
 
       // Bodyless: empty string for body hash
-      const canonical = `${method}\n${path}\n${timestamp}\n`;
+      const canonical = `${method}\n${path}\n${timestamp}\n${nonce}\n`;
       const canonicalBytes = new TextEncoder().encode(canonical);
       const signatureBytes = Buffer.from(signature, 'base64');
 
@@ -114,10 +114,10 @@ describe('crypto', () => {
       const imported = await importPrivateKey(kp.privateKeyBase64);
 
       // Sign with imported key
-      const { signature, timestamp } = await signRequest(imported, 'GET', '/v1/agents');
+      const { signature, timestamp, nonce } = await signRequest(imported, 'GET', '/v1/agents');
 
       // Verify with original public key
-      const canonical = `GET\n/v1/agents\n${timestamp}\n`;
+      const canonical = `GET\n/v1/agents\n${timestamp}\n${nonce}\n`;
       const canonicalBytes = new TextEncoder().encode(canonical);
       const signatureBytes = Buffer.from(signature, 'base64');
 
@@ -135,9 +135,9 @@ describe('crypto', () => {
       const kp = await generateKeyPair();
       const importedPub = await importPublicKey(kp.publicKeyBase64);
 
-      const { signature, timestamp } = await signRequest(kp.privateKey, 'GET', '/v1/agents');
+      const { signature, timestamp, nonce } = await signRequest(kp.privateKey, 'GET', '/v1/agents');
 
-      const canonical = `GET\n/v1/agents\n${timestamp}\n`;
+      const canonical = `GET\n/v1/agents\n${timestamp}\n${nonce}\n`;
       const canonicalBytes = new TextEncoder().encode(canonical);
       const signatureBytes = Buffer.from(signature, 'base64');
 

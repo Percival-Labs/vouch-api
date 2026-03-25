@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import { db, agents, outcomes } from '@percival/vouch-db';
 import { eq, and, or, desc, sql } from 'drizzle-orm';
 import { success, paginated, error } from '../lib/response';
+import { validate, SdkAgentRegisterSchema, SdkOutcomeSchema } from '../lib/schemas';
 import type { NostrAuthEnv } from '../middleware/nostr-auth';
 import { reportOutcome, computePerformanceFromOutcomes } from '../services/outcome-service';
 import { computeBackingComponent, getPoolByAgent } from '../services/staking-service';
@@ -24,22 +25,16 @@ app.post('/register', async (c) => {
       return error(c, 401, 'AUTH_REQUIRED', 'NIP-98 authorization required for registration');
     }
 
-    const body = await c.req.json<{
-      pubkey?: string;
-      npub?: string;
-      name: string;
-      model?: string;
-      capabilities?: string[];
-      description?: string;
-    }>();
-
-    if (!body.name || body.name.trim().length === 0) {
-      return error(c, 400, 'VALIDATION_ERROR', 'name is required');
+    const raw = await c.req.json();
+    const parsed = validate(SdkAgentRegisterSchema, raw);
+    if (!parsed.success) {
+      return error(c, 400, parsed.error.code, parsed.error.message, parsed.error.details);
     }
+    const body = parsed.data;
 
     // Use pubkey from auth event, not from body (auth is authoritative)
     const agentPubkey = pubkey;
-    const agentNpub = body.npub || null;
+    const agentNpub = (raw as { npub?: string }).npub || null;
 
     // Check for duplicate pubkey
     const existing = await db.select({ id: agents.id }).from(agents)
@@ -50,16 +45,16 @@ app.post('/register', async (c) => {
 
     // Check for duplicate name
     const existingName = await db.select({ id: agents.id }).from(agents)
-      .where(eq(agents.name, body.name.trim())).limit(1);
+      .where(eq(agents.name, body.name)).limit(1);
     if (existingName.length > 0) {
       return error(c, 409, 'DUPLICATE_NAME', 'An agent with this name already exists');
     }
 
     // Generate NIP-05 identifier
-    const nip05 = `${body.name.trim().toLowerCase().replace(/[^a-z0-9]/g, '-')}@vouch.xyz`;
+    const nip05 = `${body.name.toLowerCase().replace(/[^a-z0-9]/g, '-')}@vouch.xyz`;
 
     const [agent] = await db.insert(agents).values({
-      name: body.name.trim(),
+      name: body.name,
       modelFamily: body.model || null,
       description: body.description || '',
       pubkey: agentPubkey,
@@ -255,27 +250,16 @@ outcomeRoutes.post('/', async (c) => {
   }
 
   try {
-    const body = await c.req.json<{
-      counterparty: string;
-      role: 'performer' | 'purchaser';
-      task_type: string;
-      success: boolean;
-      rating?: number;
-      evidence?: string;
-      task_ref?: string;
-    }>();
+    const raw = await c.req.json();
+    const parsed = validate(SdkOutcomeSchema, raw);
+    if (!parsed.success) {
+      return error(c, 400, parsed.error.code, parsed.error.message, parsed.error.details);
+    }
+    const body = parsed.data;
 
     // H7 fix: require task_ref explicitly to prevent outcome flood with auto-generated UUIDs
-    if (!body.counterparty || !body.role || !body.task_type || body.success === undefined || !body.task_ref) {
-      return error(c, 400, 'VALIDATION_ERROR', 'counterparty, role, task_type, task_ref, and success are required');
-    }
-
-    if (body.role !== 'performer' && body.role !== 'purchaser') {
-      return error(c, 400, 'VALIDATION_ERROR', 'role must be "performer" or "purchaser"');
-    }
-
-    if (body.rating !== undefined && (body.rating < 1 || body.rating > 5)) {
-      return error(c, 400, 'VALIDATION_ERROR', 'rating must be between 1 and 5');
+    if (!body.task_ref) {
+      return error(c, 400, 'VALIDATION_ERROR', 'task_ref is required');
     }
 
     // C4 fix: prevent self-vouching at route level
@@ -286,7 +270,7 @@ outcomeRoutes.post('/', async (c) => {
     const result = await reportOutcome({
       agentPubkey: pubkey,
       counterpartyPubkey: body.counterparty,
-      role: body.role,
+      role: body.role as 'performer' | 'purchaser',
       taskType: body.task_type,
       taskRef: body.task_ref,
       success: body.success,

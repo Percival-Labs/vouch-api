@@ -101,6 +101,61 @@ export async function payInvoice(bolt11: string): Promise<AlbyPayment> {
   });
 }
 
+// ── HODL Invoice Support ──
+// These wrap NIP-47 hold invoice methods. If the backend (LDK) doesn't support them,
+// they throw — caller should catch and fall back to Path B (treasury relay).
+
+export interface HoldInvoice {
+  paymentRequest: string;
+  paymentHash: string;
+}
+
+/**
+ * Create a HOLD invoice that locks sats in an HTLC until settled or cancelled.
+ * Path A only — throws if backend doesn't support hold invoices.
+ */
+export async function createHoldInvoice(
+  amountSats: number,
+  paymentHash: string,
+  memo: string,
+): Promise<HoldInvoice> {
+  return withNwcClient(async (client) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (client as any).makeHoldInvoice({
+      amount: amountSats * 1000, // millisats
+      payment_hash: paymentHash,
+      description: memo,
+    }) as Record<string, unknown>;
+
+    return {
+      paymentRequest: result.invoice as string,
+      paymentHash: result.payment_hash as string,
+    };
+  });
+}
+
+/**
+ * Settle a HOLD invoice by revealing the preimage. Sats transfer to treasury.
+ * Path A only.
+ */
+export async function settleHoldInvoice(preimage: string): Promise<void> {
+  return withNwcClient(async (client) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (client as any).settleHoldInvoice({ preimage });
+  });
+}
+
+/**
+ * Cancel a HOLD invoice. Sats return to payer via HTLC cancellation.
+ * Path A only.
+ */
+export async function cancelHoldInvoice(paymentHash: string): Promise<void> {
+  return withNwcClient(async (client) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (client as any).cancelHoldInvoice({ payment_hash: paymentHash });
+  });
+}
+
 // ── Balance ──
 
 /**

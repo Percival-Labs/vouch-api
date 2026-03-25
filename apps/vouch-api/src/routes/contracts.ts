@@ -16,6 +16,7 @@ import {
   PaginationSchema,
   UpdateISCSchema,
   SubmitBidSchema,
+  FundContractSchema,
 } from '../lib/schemas';
 import type { NostrAuthEnv } from '../middleware/nostr-auth';
 import {
@@ -81,7 +82,7 @@ app.post('/', async (c) => {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST / error:', message);
     if (message.includes('Milestone percentages')) {
-      return error(c, 400, 'VALIDATION_ERROR', message);
+      return error(c, 400, 'VALIDATION_ERROR', 'Invalid milestone configuration');
     }
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to create contract');
   }
@@ -142,8 +143,8 @@ app.post('/:id/activate', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST /:id/activate error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Cannot activate')) return error(c, 409, 'INVALID_STATE', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract not found');
+    if (message.includes('Cannot activate')) return error(c, 409, 'INVALID_STATE', 'Contract cannot be activated in its current state');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to activate contract');
   }
 });
@@ -155,19 +156,18 @@ app.post('/:id/fund', async (c) => {
 
   try {
     const contractId = c.req.param('id');
-    const body = await c.req.json<{ nwc_connection_id: string }>();
-    if (!body.nwc_connection_id) {
-      return error(c, 400, 'VALIDATION_ERROR', 'nwc_connection_id is required');
-    }
+    const raw = await c.req.json();
+    const v = validate(FundContractSchema, raw);
+    if (!v.success) return error(c, 400, v.error.code, v.error.message, v.error.details);
 
-    const result = await fundContract(contractId, pubkey, body.nwc_connection_id);
+    const result = await fundContract(contractId, pubkey, v.data.nwc_connection_id);
     return success(c, result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST /:id/fund error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Cannot fund')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('insufficient')) return error(c, 400, 'INSUFFICIENT_BUDGET', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract not found');
+    if (message.includes('Cannot fund')) return error(c, 409, 'INVALID_STATE', 'Contract cannot be funded in its current state');
+    if (message.includes('insufficient')) return error(c, 400, 'INSUFFICIENT_BUDGET', 'Insufficient budget to fund contract');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to fund contract');
   }
 });
@@ -188,9 +188,9 @@ app.post('/:id/cancel', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST /:id/cancel error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Cannot cancel')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('Only contract parties')) return error(c, 403, 'FORBIDDEN', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract not found');
+    if (message.includes('Cannot cancel')) return error(c, 409, 'INVALID_STATE', 'Contract cannot be cancelled in its current state');
+    if (message.includes('Only contract parties')) return error(c, 403, 'FORBIDDEN', 'Not authorized to cancel this contract');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to cancel contract');
   }
 });
@@ -215,15 +215,16 @@ app.post('/:id/milestones/:mid/submit', async (c) => {
       v.data.deliverable_notes,
       v.data.isc_evidence,
       v.data.skills_used,
+      v.data.agent_bolt11,
     );
     return success(c, { submitted: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST milestones/submit error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Cannot submit')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('retention')) return error(c, 400, 'VALIDATION_ERROR', message);
-    if (message.includes('Missing evidence for critical ISC')) return error(c, 400, 'ISC_EVIDENCE_MISSING', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract or milestone not found');
+    if (message.includes('Cannot submit')) return error(c, 409, 'INVALID_STATE', 'Milestone cannot be submitted in its current state');
+    if (message.includes('retention')) return error(c, 400, 'VALIDATION_ERROR', 'Invalid retention configuration');
+    if (message.includes('Missing evidence for critical ISC')) return error(c, 400, 'ISC_EVIDENCE_MISSING', 'Required ISC evidence is missing');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to submit milestone');
   }
 });
@@ -240,8 +241,8 @@ app.post('/:id/milestones/:mid/accept', async (c) => {
     const iscOverrides = (body as { isc_overrides?: Record<string, { status: 'passed' | 'failed'; note?: string }> }).isc_overrides;
     const result = await acceptMilestone(contractId, milestoneId, pubkey, iscOverrides);
 
-    // Trigger payment release (non-blocking, matching staking-service pattern)
-    releaseMilestonePayment(contractId, milestoneId).catch((err) => {
+    // Trigger payment release (non-blocking). S4 fix: pass pubkey for defense-in-depth.
+    releaseMilestonePayment(contractId, milestoneId, pubkey).catch((err) => {
       console.error(`[contracts] Payment release failed for milestone ${milestoneId}:`, err);
     });
 
@@ -249,10 +250,10 @@ app.post('/:id/milestones/:mid/accept', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST milestones/accept error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Cannot accept')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('critical ISC criteria')) return error(c, 400, 'ISC_CRITERIA_NOT_MET', message);
-    if (message.includes('anti-criteria violated')) return error(c, 400, 'ISC_ANTI_CRITERIA_VIOLATED', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract or milestone not found');
+    if (message.includes('Cannot accept')) return error(c, 409, 'INVALID_STATE', 'Milestone cannot be accepted in its current state');
+    if (message.includes('critical ISC criteria')) return error(c, 400, 'ISC_CRITERIA_NOT_MET', 'Critical ISC criteria have not been met');
+    if (message.includes('anti-criteria violated')) return error(c, 400, 'ISC_ANTI_CRITERIA_VIOLATED', 'ISC anti-criteria have been violated');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to accept milestone');
   }
 });
@@ -274,8 +275,8 @@ app.post('/:id/milestones/:mid/reject', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST milestones/reject error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Cannot reject')) return error(c, 409, 'INVALID_STATE', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract or milestone not found');
+    if (message.includes('Cannot reject')) return error(c, 409, 'INVALID_STATE', 'Milestone cannot be rejected in its current state');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to reject milestone');
   }
 });
@@ -301,9 +302,9 @@ app.post('/:id/change-orders', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST change-orders error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Cannot propose')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('Only contract parties')) return error(c, 403, 'FORBIDDEN', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract not found');
+    if (message.includes('Cannot propose')) return error(c, 409, 'INVALID_STATE', 'Change orders cannot be proposed in the current contract state');
+    if (message.includes('Only contract parties')) return error(c, 403, 'FORBIDDEN', 'Not authorized to propose change orders');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to propose change order');
   }
 });
@@ -321,9 +322,9 @@ app.post('/:id/change-orders/:coId/approve', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST change-orders/approve error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Cannot approve')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('your own')) return error(c, 403, 'FORBIDDEN', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Change order not found');
+    if (message.includes('Cannot approve')) return error(c, 409, 'INVALID_STATE', 'Change order cannot be approved in its current state');
+    if (message.includes('your own')) return error(c, 403, 'FORBIDDEN', 'Cannot approve your own change order');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to approve change order');
   }
 });
@@ -345,9 +346,9 @@ app.post('/:id/change-orders/:coId/reject', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST change-orders/reject error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Cannot reject')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('your own')) return error(c, 403, 'FORBIDDEN', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Change order not found');
+    if (message.includes('Cannot reject')) return error(c, 409, 'INVALID_STATE', 'Change order cannot be rejected in its current state');
+    if (message.includes('your own')) return error(c, 403, 'FORBIDDEN', 'Cannot reject your own change order');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to reject change order');
   }
 });
@@ -368,10 +369,10 @@ app.post('/:id/rate', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST /:id/rate error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('only rate')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('already rated')) return error(c, 409, 'ALREADY_RATED', message);
-    if (message.includes('Only contract parties')) return error(c, 403, 'FORBIDDEN', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract not found');
+    if (message.includes('only rate')) return error(c, 409, 'INVALID_STATE', 'Contract is not in a rateable state');
+    if (message.includes('already rated')) return error(c, 409, 'ALREADY_RATED', 'You have already rated this contract');
+    if (message.includes('Only contract parties')) return error(c, 403, 'FORBIDDEN', 'Not authorized to rate this contract');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to rate contract');
   }
 });
@@ -396,9 +397,9 @@ app.post('/:id/release-retention', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST /:id/release-retention error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('already released')) return error(c, 409, 'ALREADY_RELEASED', message);
-    if (message.includes('not yet releasable')) return error(c, 409, 'TOO_EARLY', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract not found');
+    if (message.includes('already released')) return error(c, 409, 'ALREADY_RELEASED', 'Retention has already been released');
+    if (message.includes('not yet releasable')) return error(c, 409, 'TOO_EARLY', 'Retention is not yet eligible for release');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to release retention');
   }
 });
@@ -416,8 +417,8 @@ app.get('/:id/milestones/:mid/isc', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] GET milestones/isc error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Only contract parties')) return error(c, 403, 'FORBIDDEN', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract or milestone not found');
+    if (message.includes('Only contract parties')) return error(c, 403, 'FORBIDDEN', 'Not authorized to view ISC criteria');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to get ISC criteria');
   }
 });
@@ -441,10 +442,10 @@ app.put('/:id/milestones/:mid/isc', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] PUT milestones/isc error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Only contract parties')) return error(c, 403, 'FORBIDDEN', message);
-    if (message.includes('Cannot update ISC')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('ISC validation failed')) return error(c, 400, 'VALIDATION_ERROR', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract or milestone not found');
+    if (message.includes('Only contract parties')) return error(c, 403, 'FORBIDDEN', 'Not authorized to update ISC criteria');
+    if (message.includes('Cannot update ISC')) return error(c, 409, 'INVALID_STATE', 'ISC criteria cannot be updated in the current state');
+    if (message.includes('ISC validation failed')) return error(c, 400, 'VALIDATION_ERROR', 'ISC criteria validation failed');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to update ISC criteria');
   }
 });
@@ -486,17 +487,17 @@ app.post('/:id/bids', async (c) => {
     const v = validate(SubmitBidSchema, body);
     if (!v.success) return error(c, 400, v.error.code, v.error.message, v.error.details);
 
-    const result = await submitBid(contractId, pubkey, v.data.approach, v.data.cost_sats, v.data.estimated_days);
+    const result = await submitBid(contractId, pubkey, v.data.approach, v.data.cost_sats, v.data.estimated_days, v.data.payout_preference);
     return success(c, result, 201);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST /:id/bids error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('not open')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('your own')) return error(c, 403, 'FORBIDDEN', message);
-    if (message.includes('already have')) return error(c, 409, 'DUPLICATE_BID', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract not found');
+    if (message.includes('not open')) return error(c, 409, 'INVALID_STATE', 'Contract is not open for bidding');
+    if (message.includes('your own')) return error(c, 403, 'FORBIDDEN', 'Cannot bid on your own contract');
+    if (message.includes('already have')) return error(c, 409, 'DUPLICATE_BID', 'You already have an active bid on this contract');
     if (message.includes('cost_sats') || message.includes('estimated_days') || message.includes('approach')) {
-      return error(c, 400, 'VALIDATION_ERROR', message);
+      return error(c, 400, 'VALIDATION_ERROR', 'Invalid bid parameters');
     }
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to submit bid');
   }
@@ -514,7 +515,7 @@ app.get('/:id/bids', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] GET /:id/bids error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Contract not found');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to list bids');
   }
 });
@@ -532,10 +533,10 @@ app.post('/:id/bids/:bidId/accept', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST /:id/bids/:bidId/accept error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Only the customer')) return error(c, 403, 'FORBIDDEN', message);
-    if (message.includes('not open') || message.includes('not pending')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('does not belong')) return error(c, 400, 'VALIDATION_ERROR', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Bid not found');
+    if (message.includes('Only the customer')) return error(c, 403, 'FORBIDDEN', 'Only the contract customer can accept bids');
+    if (message.includes('not open') || message.includes('not pending')) return error(c, 409, 'INVALID_STATE', 'Bid cannot be accepted in its current state');
+    if (message.includes('does not belong')) return error(c, 400, 'VALIDATION_ERROR', 'Bid does not belong to this contract');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to accept bid');
   }
 });
@@ -553,10 +554,10 @@ app.post('/:id/bids/:bidId/reject', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST /:id/bids/:bidId/reject error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Only the customer')) return error(c, 403, 'FORBIDDEN', message);
-    if (message.includes('not pending')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('does not belong')) return error(c, 400, 'VALIDATION_ERROR', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Bid not found');
+    if (message.includes('Only the customer')) return error(c, 403, 'FORBIDDEN', 'Only the contract customer can reject bids');
+    if (message.includes('not pending')) return error(c, 409, 'INVALID_STATE', 'Bid is not in a pending state');
+    if (message.includes('does not belong')) return error(c, 400, 'VALIDATION_ERROR', 'Bid does not belong to this contract');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to reject bid');
   }
 });
@@ -574,10 +575,10 @@ app.post('/:id/bids/:bidId/withdraw', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[contracts] POST /:id/bids/:bidId/withdraw error:', message);
-    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', message);
-    if (message.includes('Only the bidder')) return error(c, 403, 'FORBIDDEN', message);
-    if (message.includes('not pending')) return error(c, 409, 'INVALID_STATE', message);
-    if (message.includes('does not belong')) return error(c, 400, 'VALIDATION_ERROR', message);
+    if (message.includes('not found')) return error(c, 404, 'NOT_FOUND', 'Bid not found');
+    if (message.includes('Only the bidder')) return error(c, 403, 'FORBIDDEN', 'Only the bidder can withdraw their bid');
+    if (message.includes('not pending')) return error(c, 409, 'INVALID_STATE', 'Bid is not in a pending state');
+    if (message.includes('does not belong')) return error(c, 400, 'VALIDATION_ERROR', 'Bid does not belong to this contract');
     return error(c, 500, 'INTERNAL_ERROR', 'Failed to withdraw bid');
   }
 });
